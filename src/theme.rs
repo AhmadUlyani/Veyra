@@ -17,12 +17,23 @@ pub struct Theme {
     pub fg: C,
     /// How much to firm up faded (secondary) text and icons: 0 = as designed, 1 = fully solid.
     pub text_contrast: f32,
+    /// The same three, used while the island is open (expanded). Equal to the above unless
+    /// theme.conf sets `expanded_*`.
+    pub bg_open: Vec<(f32, C)>,
+    pub fg_open: C,
+    pub text_contrast_open: f32,
     /// Regular buttons (None = translucent, follows `fg`).
     pub button: Option<C>,
     pub button_hover: Option<C>,
     pub button_text: Option<C>,
+    /// The selected button (open tab). None = a step stronger than `button`.
+    pub button_active: Option<C>,
     /// Main filled buttons (Start focus, + Bottle, add task, Deselect). None = each feature's color.
     pub button_accent: Option<C>,
+    /// Regular icons (None = the text color).
+    pub icon: Option<C>,
+    /// Icons of the open tab / switched-on toggles (None = each feature's color).
+    pub icon_active: Option<C>,
 }
 
 impl Default for Theme {
@@ -31,10 +42,16 @@ impl Default for Theme {
             bg: vec![(0.0, C(0.0, 0.0, 0.0, 1.0))],
             fg: C(1.0, 1.0, 1.0, 1.0),
             text_contrast: 0.0,
+            bg_open: vec![(0.0, C(0.0, 0.0, 0.0, 1.0))],
+            fg_open: C(1.0, 1.0, 1.0, 1.0),
+            text_contrast_open: 0.0,
             button: None,
             button_hover: None,
             button_text: None,
+            button_active: None,
             button_accent: None,
+            icon: None,
+            icon_active: None,
         }
     }
 }
@@ -57,6 +74,21 @@ solid = #000000
 # Example (pink, light at the top):
 gradient = #F07A8A 0, #F2B5BC 0.45, #F2DCE0 0.75
 
+# --- Background while open --------------------------------------
+# Colors used while the island is open (clicked). The island fades
+# between the two when it opens and closes.
+# same     = keep the background above
+# solid    = one color (uses \"expanded_solid\")
+# gradient = several colors (uses \"expanded_gradient\", same format as above)
+# Example (black outside, blue gradient inside):
+#   mode = solid
+#   solid = #000000
+#   expanded_mode = gradient
+#   expanded_gradient = #0A1A4A 0, #1E4FD8 0.6, #4A8BFF 1
+expanded_mode = same
+expanded_solid = #000000
+expanded_gradient = #0A1A4A 0, #1E4FD8 0.6, #4A8BFF 1
+
 # --- Text -------------------------------------------------------
 # auto = white on dark backgrounds, dark on light ones
 text = auto
@@ -69,16 +101,63 @@ text = auto
 #   or a number from 0 (normal) to 100 (max)
 text_contrast = auto
 
+# Text while open: same = as above; auto = picked for the open background;
+# or a color. expanded_text_contrast takes the same values as text_contrast
+# (plus \"same\").
+expanded_text = auto
+expanded_text_contrast = auto
+
 # --- Buttons ----------------------------------------------------
 # auto = translucent, follows the text color
 button = auto
 button_hover = auto
 button_text = auto
 
+# Selected button (the open tab in the top bar)
+# auto = a little stronger than \"button\" (button_hover does not change it)
+button_active = auto
+
 # Main colored buttons (Start focus, + Bottle, add task, Deselect)
 # auto = keep each feature's own color
 button_accent = auto
+
+# --- Icons ------------------------------------------------------
+# Icon colors, set apart from the text.
+# icon        = regular icons (tabs, play / next, + and -, undo, ...)
+#               auto = same color as the text
+# icon_active = icon of the open tab and of switched-on toggles (lyrics)
+#               auto = each feature's own color
+icon = auto
+icon_active = auto
 ";
+
+/// Options added after the first release: (where the block starts in `DEFAULT_FILE`, what
+/// follows it). Older files get the options they do not set yet appended.
+const ADDED: &[(&str, &str)] = &[
+    ("# --- Background while open", "\n# --- Text"),
+    ("# Text while open", "\n# --- Buttons"),
+    ("# Selected button", "\n# Main colored"),
+    ("# --- Icons", ""),
+];
+
+/// The `ADDED` blocks with every option `cur` already sets left out (so an appended default
+/// never overrides the user's own value), ready to append. Blocks with nothing left are skipped.
+fn missing_blocks(cur: &str) -> String {
+    let have = pairs(cur);
+    let set = |line: &str| pairs(line).first().map(|(k, _)| have.iter().any(|(h, _)| h == k));
+    let mut out = Vec::new();
+    for (from, to) in ADDED {
+        let Some(i) = DEFAULT_FILE.find(from) else { continue };
+        let end = if to.is_empty() { Some(DEFAULT_FILE.len() - i) } else { DEFAULT_FILE[i..].find(to) };
+        let Some(e) = end else { continue };
+        let lines: Vec<&str> = DEFAULT_FILE[i..i + e].trim_end().lines().filter(|l| set(l) != Some(true)).collect();
+        // only comments left: the user already has every option of this block
+        if lines.iter().any(|l| set(l) == Some(false)) {
+            out.push(lines.join("\n"));
+        }
+    }
+    out.join("\n\n")
+}
 
 fn dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("APPDATA")?).join("Veyra"))
@@ -97,6 +176,12 @@ pub fn ensure_file() -> Option<PathBuf> {
         let text = std::fs::read_to_string(&old).ok().and_then(|s| from_json(&s)).unwrap_or_else(|| DEFAULT_FILE.to_string());
         if std::fs::write(&p, text).is_ok() && old.exists() {
             let _ = std::fs::rename(&old, dir()?.join("theme.json.old"));
+        }
+    } else if let Ok(cur) = std::fs::read_to_string(&p) {
+        // older file without some newer options: append them (the user's settings stay)
+        let add = missing_blocks(&cur);
+        if !add.is_empty() {
+            let _ = std::fs::write(&p, format!("{}\n\n{}\n", cur.trim_end(), add));
         }
     }
     Some(p)
@@ -139,37 +224,72 @@ pub fn parse(s: &str) -> Theme {
     let kv = pairs(s);
     // the last occurrence of a key wins
     let get = |k: &str| kv.iter().rev().find(|(key, _)| key == k).map(|(_, v)| v);
-    let mut bg = Vec::new();
-    if get("mode").map(|m| m.eq_ignore_ascii_case("gradient")).unwrap_or(false) {
-        bg = parse_gradient(get("gradient").map(|s| s.as_str()).unwrap_or(""));
-    }
-    if bg.is_empty() {
-        bg.push((0.0, opt_color(get("solid")).unwrap_or(C(0.0, 0.0, 0.0, 1.0))));
-    }
+    let is = |k: &str, v: &str| get(k).map(|m| m.trim().eq_ignore_ascii_case(v)).unwrap_or(false);
+
+    let bg = background(is("mode", "gradient"), get("gradient"), get("solid"));
     let fg = opt_color(get("text")).unwrap_or_else(|| auto_fg(&bg));
-    let light_bg = luma(bg.iter().map(|s| s.1)) > 0.6;
-    let text_contrast = match get("text_contrast").map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-        Some("normal") | Some("low") => 0.0,
-        Some("high") => 0.6,
-        Some("max") => 1.0,
-        Some(n) if n.trim_end_matches('%').parse::<f32>().is_ok() => (n.trim_end_matches('%').parse::<f32>().unwrap() / 100.0).clamp(0.0, 1.0),
-        // auto (or anything else)
-        _ => {
-            if light_bg {
-                0.45
-            } else {
-                0.0
-            }
-        }
+    let text_contrast = contrast(get("text_contrast"), &bg);
+
+    // open (expanded) colors: "same" (or nothing) keeps the ones above
+    let open_differs = is("expanded_mode", "solid") || is("expanded_mode", "gradient");
+    let bg_open = if open_differs {
+        background(is("expanded_mode", "gradient"), get("expanded_gradient"), get("expanded_solid"))
+    } else {
+        bg.clone()
+    };
+    let fg_open = match get("expanded_text") {
+        Some(v) if v.trim().eq_ignore_ascii_case("same") => fg,
+        v => opt_color(v).unwrap_or_else(|| if open_differs { auto_fg(&bg_open) } else { fg }),
+    };
+    let text_contrast_open = match get("expanded_text_contrast") {
+        Some(v) if v.trim().eq_ignore_ascii_case("same") => text_contrast,
+        Some(v) if !(v.trim().is_empty() || v.trim().eq_ignore_ascii_case("auto")) => contrast(Some(v), &bg_open),
+        _ if open_differs => contrast(None, &bg_open),
+        _ => text_contrast,
     };
     Theme {
         bg,
         fg,
         text_contrast,
+        bg_open,
+        fg_open,
+        text_contrast_open,
         button: opt_color(get("button")),
         button_hover: opt_color(get("button_hover")),
         button_text: opt_color(get("button_text")),
+        button_active: opt_color(get("button_active")),
         button_accent: opt_color(get("button_accent")),
+        icon: opt_color(get("icon")),
+        icon_active: opt_color(get("icon_active")),
+    }
+}
+
+/// Gradient stops (when `gradient` is set and valid) or one solid stop (black by default).
+fn background(gradient: bool, grad: Option<&String>, solid: Option<&String>) -> Vec<(f32, C)> {
+    let mut bg = Vec::new();
+    if gradient {
+        bg = parse_gradient(grad.map(|s| s.as_str()).unwrap_or(""));
+    }
+    if bg.is_empty() {
+        bg.push((0.0, opt_color(solid).unwrap_or(C(0.0, 0.0, 0.0, 1.0))));
+    }
+    bg
+}
+
+/// `text_contrast` value; "auto" (or anything unknown) firms text up on light backgrounds.
+fn contrast(v: Option<&String>, bg: &[(f32, C)]) -> f32 {
+    match v.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("normal") | Some("low") => 0.0,
+        Some("high") => 0.6,
+        Some("max") => 1.0,
+        Some(n) if n.trim_end_matches('%').parse::<f32>().is_ok() => (n.trim_end_matches('%').parse::<f32>().unwrap() / 100.0).clamp(0.0, 1.0),
+        _ => {
+            if luma(bg.iter().map(|s| s.1)) > 0.6 {
+                0.45
+            } else {
+                0.0
+            }
+        }
     }
 }
 
@@ -319,6 +439,58 @@ mod tests {
         assert_eq!(t.button, color("#333333"));
         assert_eq!(t.button_hover, None);
         assert_eq!(t.button_accent, color("#F07A8A"));
+    }
+
+    #[test]
+    fn expanded_colors() {
+        // not set: open looks like closed
+        let t = parse("mode = gradient\ngradient = #F07A8A, #F2DCE0\ntext = #ff0000");
+        assert_eq!((t.bg_open.clone(), t.fg_open), (t.bg.clone(), t.fg));
+        // black outside, blue gradient inside
+        let t = parse(DEFAULT_FILE.replace("expanded_mode = same", "expanded_mode = gradient").as_str());
+        assert_eq!(t.bg, vec![(0.0, C(0.0, 0.0, 0.0, 1.0))]);
+        assert_eq!(t.bg_open.len(), 3);
+        assert_eq!(t.bg_open[2].1, color("#4A8BFF").unwrap());
+        // light open background: dark text inside, white outside
+        let t = parse("expanded_mode = solid\nexpanded_solid = #F2DCE0");
+        assert!(t.fg_open.0 < 0.5 && t.fg.0 > 0.5);
+        assert!(t.text_contrast_open > 0.0 && t.text_contrast == 0.0);
+        let t = parse("text = #00ff00\nexpanded_mode = solid\nexpanded_solid = #F2DCE0\nexpanded_text = same\nexpanded_text_contrast = max");
+        assert_eq!(t.fg_open, C(0.0, 1.0, 0.0, 1.0));
+        assert_eq!(t.text_contrast_open, 1.0);
+    }
+
+    #[test]
+    fn appended_blocks() {
+        // a first-release file gets every newer block
+        let sec = missing_blocks("solid = #222222\nbutton = auto");
+        for k in ["expanded_mode = same", "expanded_text_contrast = auto", "button_active = auto", "icon = auto", "icon_active = auto"] {
+            assert!(sec.contains(k), "{k}");
+        }
+        let t = parse(&format!("solid = #222222\n{}", sec.replace("expanded_mode = same", "expanded_mode = gradient")));
+        assert_eq!(t.bg[0].1, color("#222222").unwrap());
+        assert_eq!(t.bg_open.len(), 3);
+        // only what is missing, and nothing for the full default file
+        let sec = missing_blocks("expanded_mode = same\nexpanded_text = auto");
+        let keys: Vec<String> = pairs(&sec).into_iter().map(|(k, _)| k).collect();
+        assert!(!keys.contains(&"expanded_mode".into()) && !keys.contains(&"expanded_text".into()));
+        for k in ["expanded_solid", "expanded_text_contrast", "button_active", "icon_active"] {
+            assert!(keys.contains(&k.to_string()), "{k}");
+        }
+        assert_eq!(missing_blocks(DEFAULT_FILE), "");
+        // a value the user already set is never appended again (it would win, being last)
+        let cur = "solid = #000\nicon_active = #FF8800";
+        let sec = missing_blocks(cur);
+        assert!(sec.contains("icon = auto") && !pairs(&sec).iter().any(|(k, _)| k == "icon_active"));
+        assert_eq!(parse(&format!("{cur}\n{sec}")).icon_active, color("#FF8800"));
+    }
+
+    #[test]
+    fn icons() {
+        let t = parse("icon = #FFCC00\nicon_active = auto\nbutton_active = #223344");
+        assert_eq!(t.icon, color("#FFCC00"));
+        assert_eq!(t.icon_active, None);
+        assert_eq!(t.button_active, color("#223344"));
     }
 
     #[test]

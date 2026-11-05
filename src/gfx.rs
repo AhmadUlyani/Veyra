@@ -58,11 +58,18 @@ pub struct Gfx {
     dw: IDWriteFactory,
     rt: ID2D1DCRenderTarget,
     brush: ID2D1SolidColorBrush,
-    /// island background: a solid color, or a vertical gradient brush (theme.json)
-    bg_solid: Cell<C>,
-    bg_grad: Option<ID2D1LinearGradientBrush>,
+    /// island background: a solid color, or a vertical gradient brush (theme.conf);
+    /// `[0]` while closed, `[1]` while open
+    bg_solid: [Cell<C>; 2],
+    bg_grad: [Option<ID2D1LinearGradientBrush>; 2],
+    /// how far the open colors are faded in (0 = closed colors, 1 = open colors)
+    open: Cell<f32>,
     /// replaces pure white (text, icons, translucent surfaces) so light themes stay readable
     fg: Cell<C>,
+    /// current `text_contrast` (blended between closed and open)
+    contrast: Cell<f32>,
+    /// brightness of the current background (blended between closed and open)
+    bg_luma: Cell<f32>,
     /// the current UI colors (theme.conf)
     pub theme: crate::theme::Theme,
     layers: Vec<ID2D1Layer>,
@@ -141,8 +148,11 @@ impl Gfx {
                 dw,
                 rt,
                 brush,
-                bg_solid: Cell::new(BLACK),
-                bg_grad: None,
+                bg_solid: [Cell::new(BLACK), Cell::new(BLACK)],
+                bg_grad: [None, None],
+                open: Cell::new(0.0),
+                contrast: Cell::new(0.0),
+                bg_luma: Cell::new(0.0),
                 fg: Cell::new(WHITE),
                 theme: crate::theme::Theme::default(),
                 layers,
@@ -318,39 +328,95 @@ impl Gfx {
     /// Island colors: `bg` stops run from the bottom (0.0) to the top (1.0).
     pub fn set_theme(&mut self, th: &crate::theme::Theme) {
         self.theme = th.clone();
-        let (bg, fg) = (&th.bg, th.fg);
-        self.fg.set(fg);
-        self.bg_grad = None;
-        self.bg_solid.set(bg.first().map(|s| s.1).unwrap_or(BLACK));
+        for (i, bg) in [&th.bg, &th.bg_open].into_iter().enumerate() {
+            self.bg_solid[i].set(bg.first().map(|s| s.1).unwrap_or(BLACK));
+            self.bg_grad[i] = self.gradient(bg);
+        }
+        self.set_open(self.open.get());
+    }
+
+    fn gradient(&self, bg: &[(f32, C)]) -> Option<ID2D1LinearGradientBrush> {
         if bg.len() < 2 {
-            return;
+            return None;
         }
         let stops: Vec<D2D1_GRADIENT_STOP> = bg.iter().map(|(p, c)| D2D1_GRADIENT_STOP { position: *p, color: c.d2d() }).collect();
         unsafe {
-            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let coll = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
             let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(0.0, 1.0), endPoint: pt(0.0, 0.0) };
-            self.bg_grad = self.rt.CreateLinearGradientBrush(&props, None, &coll).ok();
+            self.rt.CreateLinearGradientBrush(&props, None, &coll).ok()
         }
     }
 
-    /// The background paint, with the gradient spanning `top`..`bottom` (DIP).
-    fn bg(&self, top: f32, bottom: f32) -> ID2D1Brush {
-        match &self.bg_grad {
+    /// Fades between the closed (0) and open (1) colors: background, text and contrast.
+    pub fn set_open(&self, k: f32) {
+        let k = k.clamp(0.0, 1.0);
+        self.open.set(k);
+        let th = &self.theme;
+        let (a, b) = (th.fg, th.fg_open);
+        let mix = |x: f32, y: f32| x + (y - x) * k;
+        self.fg.set(C(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2), mix(a.3, b.3)));
+        self.contrast.set(mix(th.text_contrast, th.text_contrast_open));
+        let luma = |bg: &[(f32, C)]| crate::theme::luma(bg.iter().map(|s| s.1));
+        self.bg_luma.set(mix(luma(&th.bg), luma(&th.bg_open)));
+    }
+
+    /// On a light background, darkens a bright built-in color (feature colors, album-art accent)
+    /// used for text or an icon until it reads clearly. Left alone: the text color (white), pure
+    /// white on dark chips, and colors the user picked in theme.conf.
+    pub fn legible(&self, c: C) -> C {
+        const LIGHT_BG: f32 = 0.6;
+        const MAX_LUMA: f32 = 0.38;
+        if self.bg_luma.get() <= LIGHT_BG || (c.0 >= 0.999 && c.1 >= 0.999 && c.2 >= 0.999) {
+            return c;
+        }
+        let th = &self.theme;
+        let same = |u: &C| (u.0 - c.0).abs() < 0.002 && (u.1 - c.1).abs() < 0.002 && (u.2 - c.2).abs() < 0.002;
+        if [th.icon, th.icon_active, th.button_text].iter().flatten().any(same) {
+            return c;
+        }
+        let l = crate::theme::luma(std::iter::once(c));
+        if l <= MAX_LUMA {
+            return c;
+        }
+        let k = MAX_LUMA / l;
+        C(c.0 * k, c.1 * k, c.2 * k, c.3)
+    }
+
+    /// Whether the closed and open backgrounds look different (else only one is drawn).
+    fn open_differs(&self) -> bool {
+        self.theme.bg != self.theme.bg_open
+    }
+
+    /// Background paint `i` (0 closed, 1 open) at `opacity`, its gradient spanning `top`..`bottom` (DIP).
+    fn bg_at(&self, i: usize, opacity: f32, top: f32, bottom: f32) -> ID2D1Brush {
+        match &self.bg_grad[i] {
             Some(g) => unsafe {
                 g.SetStartPoint(pt(0.0, bottom));
                 g.SetEndPoint(pt(0.0, top));
+                g.SetOpacity(opacity);
                 g.cast().unwrap()
             },
             None => unsafe {
-                self.brush.SetColor(&self.bg_solid.get().d2d());
+                let c = self.bg_solid[i].get();
+                self.brush.SetColor(&C(c.0, c.1, c.2, c.3 * opacity).d2d());
                 self.brush.cast().unwrap()
             },
         }
     }
 
+    /// The background layers to paint, bottom first: the closed colors, then the open ones
+    /// faded in by `open` (just one of them when nothing is fading).
+    fn bg_layers(&self) -> impl Iterator<Item = (usize, f32)> {
+        let k = if self.open_differs() { self.open.get() } else { 0.0 };
+        let base = if k >= 1.0 { 1 } else { 0 };
+        std::iter::once((base, 1.0)).chain((k > 0.0 && k < 1.0).then_some((1, k)))
+    }
+
     /// Fills the island shape with the theme background (gradient from `bottom` up to `top`).
     pub fn rrect_bg(&self, r: R, rad: f32, top: f32, bottom: f32) {
-        unsafe { self.rt.FillRoundedRectangle(&rr(r, rad), &self.bg(top, bottom)) }
+        for (i, o) in self.bg_layers() {
+            unsafe { self.rt.FillRoundedRectangle(&rr(r, rad), &self.bg_at(i, o, top, bottom)) }
+        }
     }
 
     pub fn rrect(&self, r: R, rad: f32, c: C) {
@@ -446,7 +512,9 @@ impl Gfx {
     /// `x` is the shape's left edge (left = true) or right edge (left = false).
     pub fn shoulder_bg(&self, x: f32, y: f32, f: f32, left: bool, top: f32, bottom: f32) {
         if let Some(geo) = self.shoulder_geo(x, y, f, left) {
-            unsafe { self.rt.FillGeometry(&geo, &self.bg(top, bottom), None) }
+            for (i, o) in self.bg_layers() {
+                unsafe { self.rt.FillGeometry(&geo, &self.bg_at(i, o, top, bottom), None) }
+            }
         }
     }
 
@@ -528,7 +596,7 @@ impl Gfx {
 
     /// Faded text/icons get firmer with the theme's `text_contrast`.
     pub fn text_alpha(&self, c: C) -> C {
-        let k = self.theme.text_contrast;
+        let k = self.contrast.get();
         if k > 0.0 && c.3 < 1.0 {
             C(c.0, c.1, c.2, c.3 + (1.0 - c.3) * k)
         } else {
@@ -537,7 +605,7 @@ impl Gfx {
     }
 
     fn draw_text(&self, s: &str, r: R, f: &IDWriteTextFormat, c: C) {
-        let c = self.text_alpha(c);
+        let c = self.legible(self.text_alpha(c));
         let w: Vec<u16> = s.encode_utf16().collect();
         unsafe {
             self.rt.DrawText(&w, f, &r.d2d(), self.b(c), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
@@ -559,7 +627,16 @@ impl Gfx {
     pub fn icon(&self, ch: char, r: R, size: f32, c: C) {
         if let Some(f) = self.fmt(size, 400, Al::C, true, false) {
             let mut b = [0u8; 4];
-            self.draw_text(ch.encode_utf8(&mut b), r, &f, c);
+            self.draw_text(ch.encode_utf8(&mut b), r, &f, self.icon_color(c));
+        }
+    }
+
+    /// Regular (text-colored, i.e. white) icons take theme.conf `icon` when set, keeping `c`'s
+    /// transparency; colored icons stay as they are.
+    pub fn icon_color(&self, c: C) -> C {
+        match self.theme.icon {
+            Some(i) if c.0 == 1.0 && c.1 == 1.0 && c.2 == 1.0 => C(i.0, i.1, i.2, i.3 * c.3),
+            _ => c,
         }
     }
 

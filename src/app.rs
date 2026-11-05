@@ -414,6 +414,8 @@ pub struct App {
     hover_out: Option<Instant>,
     /// last seen modification time of theme.json (reloaded when it changes)
     theme_mtime: Option<std::time::SystemTime>,
+    /// how far the open (expanded) colors are faded in, 0..1
+    open_k: f32,
 }
 
 fn monitor() -> (i32, i32, f32) {
@@ -529,6 +531,7 @@ impl App {
             hover_in: None,
             hover_out: None,
             theme_mtime: theme::modified(),
+            open_k: 0.0,
         };
         Ok(app)
     }
@@ -537,6 +540,13 @@ impl App {
         self.set_tick(250);
         if let Ok(v) = std::env::var("VEYRA_DEMO") {
             self.demo_view(&v);
+            // testing aid: VEYRA_MOUSE=x,y (window pixels) pretends the cursor rests there, to see hovers
+            if let Some((x, y)) = std::env::var("VEYRA_MOUSE").ok().and_then(|m| {
+                let (x, y) = m.split_once(',')?;
+                Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+            }) {
+                self.mouse = Some((x / self.gfx.scale, y / self.gfx.scale));
+            }
         }
         self.pop_in();
         self.kick();
@@ -999,6 +1009,11 @@ impl App {
             rem -= s;
         }
         self.view_age += dt;
+        // closed ↔ open colors: ease toward the open colors while expanded
+        let open_t = if matches!(self.view, ViewKey::Expanded(..)) { 1.0 } else { 0.0 };
+        let open_moving = (open_t - self.open_k).abs() > 0.003;
+        self.open_k = if open_moving { self.open_k + (open_t - self.open_k) * (1.0 - (-dt * 11.0).exp()) } else { open_t };
+        self.gfx.set_open(self.open_k);
         // shelf: slide toward the scroll position (ease-out)
         self.shelf_scroll = self.shelf_scroll.min(self.shelf_max());
         let target = self.shelf_scroll as f32;
@@ -1045,6 +1060,7 @@ impl App {
             && self.slide.is_none()
             && !lyr_moving
             && !shelf_moving
+            && !open_moving
             && hover_still;
         if settled {
             self.sw.snap();
@@ -1179,7 +1195,7 @@ impl App {
         match self.cur_art() {
             Some(b) => g.bitmap(b, r, rad),
             None => {
-                g.rrect(r, rad, surf(g, true));
+                g.rrect(r, rad, SURF_H);
                 g.icon(ic::MUSIC, r, (r.h * 0.45).max(9.0), T2);
             }
         }
@@ -1310,7 +1326,7 @@ impl App {
             TIcon::Battery(f, ch) => draw_battery(g, r.cx() - 12.0, r.cy(), 22.0, 12.0, *f, *ch),
             TIcon::Drop => {
                 if let Some(geo) = g.drop_geo(R::new(r.cx() - 7.0, r.cy() - 9.5, 14.0, 19.0)) {
-                    g.fill_geo(&geo, acc);
+                    g.fill_geo(&geo, g.legible(acc));
                 }
             }
         }
@@ -1355,7 +1371,7 @@ impl App {
             TIcon::Battery(f, ch) => draw_battery(g, ir.cx() - 10.0, ir.cy(), 18.0, 10.0, *f, *ch),
             TIcon::Drop => {
                 if let Some(geo) = g.drop_geo(R::new(ir.cx() - 5.5, ir.cy() - 7.5, 11.0, 15.0)) {
-                    g.fill_geo(&geo, t.accent);
+                    g.fill_geo(&geo, g.legible(t.accent));
                 }
             }
         }
@@ -1375,10 +1391,12 @@ impl App {
             let b = R::new(inner.x + i as f32 * 38.0, inner.y, 34.0, 28.0);
             let hv = ui.hit(b, Act::Tab(*t));
             let active = *t == tab;
-            if active || hv {
-                g.rrect(b, 10.0, surf(g, active));
+            if active {
+                g.rrect(b, 10.0, surf_active(g));
+            } else if hv {
+                g.rrect(b, 10.0, surf(g, true));
             }
-            let col = if active { tab_color(*t) } else if hv { WHITE } else { T3 };
+            let col = if active { active_icon(g, tab_color(*t)) } else if hv { WHITE } else { T3 };
             draw_tab_icon(g, *t, b, col);
         }
         // right: battery, date, clock
@@ -1463,9 +1481,9 @@ impl App {
         let lb = R::new(col.right() - 32.0, col.y - 2.0, 32.0, 28.0);
         let hv = ui.hit(lb, Act::Lyrics);
         if self.lyrics_open || hv {
-            g.rrect(lb, 10.0, if self.lyrics_open { acc.a(0.22) } else { surf(g, false) });
+            g.rrect(lb, 10.0, if self.lyrics_open { g.theme.button_active.unwrap_or(acc.a(0.22)) } else { surf(g, false) });
         }
-        g.icon(ic::LYRICS, lb, 14.0, if self.lyrics_open { acc } else { T2 });
+        g.icon(ic::LYRICS, lb, 14.0, if self.lyrics_open { active_icon(g, acc) } else { T2 });
         let tw = col.w - 40.0;
         g.text(&m.title, R::new(col.x, col.y, tw, 22.0), 16.0, 600, WHITE, Al::L);
         let sub = if split && !m.app.is_empty() && !m.artist.is_empty() {
@@ -1707,7 +1725,7 @@ impl App {
             }
             None => {
                 g.rrect(cr, 16.0, surf(g, ch));
-                g.text("Custom", cr, 12.5, 600, T2, Al::C);
+                g.text("Custom", cr, 12.5, 600, btn_fg(g, T2), Al::C);
             }
         }
 
@@ -2968,7 +2986,7 @@ fn draw_tab_icon(g: &Gfx, t: Tab, r: R, col: C) {
         Tab::Focus => g.icon(ic::TIMER, r, 14.0, col),
         Tab::Water => {
             if let Some(geo) = g.drop_geo(R::new(r.cx() - 5.5, r.cy() - 7.5, 11.0, 15.0)) {
-                g.fill_geo(&geo, col);
+                g.fill_geo(&geo, g.legible(g.icon_color(col)));
             }
         }
         Tab::Shelf => g.icon(ic::FOLDER, r, 14.0, col),
@@ -3003,11 +3021,38 @@ fn surf(g: &Gfx, hover: bool) -> C {
     }
 }
 
-/// Text / icon color on a regular button (theme.conf `button_text`), keeping `c`'s transparency.
+/// Background of the selected button (theme.conf `button_active`); hovering never changes it.
+fn surf_active(g: &Gfx) -> C {
+    let t = &g.theme;
+    match (t.button_active, t.button) {
+        (Some(a), _) => a,
+        (None, Some(b)) => b.mix(t.fg, 0.18),
+        (None, None) => SURF_H,
+    }
+}
+
+/// Text color on a regular button (theme.conf `button_text`), keeping `c`'s transparency.
 fn btn_fg(g: &Gfx, c: C) -> C {
     match g.theme.button_text {
         Some(t) => g.text_alpha(C(t.0, t.1, t.2, t.3 * c.3)),
         None => c,
+    }
+}
+
+/// Icon color on a regular button: theme.conf `icon` wins (applied when drawn), else `button_text`.
+fn btn_icon(g: &Gfx, c: C) -> C {
+    if g.theme.icon.is_some() {
+        c
+    } else {
+        btn_fg(g, c)
+    }
+}
+
+/// Icon of the open tab / a switched-on toggle: the feature's color unless theme.conf sets `icon_active`.
+fn active_icon(g: &Gfx, feature: C) -> C {
+    match g.theme.icon_active {
+        Some(a) => C(a.0, a.1, a.2, a.3 * feature.3),
+        None => feature,
     }
 }
 
@@ -3029,7 +3074,7 @@ fn icon_btn(g: &Gfx, ui: &mut Ui, r: R, ch: char, size: f32, col: C, act: Act, b
     if hv || bg {
         g.rrect(r, (r.h / 2.0).min(11.0), surf(g, hv));
     }
-    g.icon(ch, r, size, btn_fg(g, col));
+    g.icon(ch, r, size, btn_icon(g, col));
 }
 
 fn pill_btn(g: &Gfx, ui: &mut Ui, r: R, text: &str, fg: C, bg: C, act: Act) {
@@ -3058,8 +3103,8 @@ fn stepper(g: &Gfx, ui: &mut Ui, x: f32, y: f32, label: &str, val: &str, minus: 
     if ph {
         g.rrect(pr, 9.0, surf(g, true));
     }
-    g.icon(ic::MINUS, mr, 9.0, btn_fg(g, if mh { WHITE } else { T2 }));
-    g.icon(ic::ADD, pr, 9.0, btn_fg(g, if ph { WHITE } else { T2 }));
+    g.icon(ic::MINUS, mr, 9.0, btn_icon(g, if mh { WHITE } else { T2 }));
+    g.icon(ic::ADD, pr, 9.0, btn_icon(g, if ph { WHITE } else { T2 }));
     let vr = R::new(bx + 26.0, y, box_w - 52.0, 26.0);
     let vh = ui.hit(vr, Act::Edit(field));
     value_box(g, vr, val, edit, vh, 11.5);
