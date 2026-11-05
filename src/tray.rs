@@ -10,6 +10,7 @@ pub const WM_APP_TRAY: u32 = WM_APP + 2;
 pub const CMD_AUTOSTART: u32 = 10;
 pub const CMD_QUIT: u32 = 11;
 pub const CMD_HIDE: u32 = 12;
+pub const CMD_THEME: u32 = 13;
 
 fn nid(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
@@ -48,6 +49,7 @@ pub fn menu(hwnd: HWND, autostart: bool, hidden: bool) -> u32 {
         let _ = AppendMenuW(m, MF_STRING, CMD_HIDE as usize, hide);
         let flags = if autostart { MF_STRING | MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(m, flags, CMD_AUTOSTART as usize, w!("Start with Windows"));
+        let _ = AppendMenuW(m, MF_STRING, CMD_THEME as usize, w!("UI colors (theme.conf)..."));
         let _ = AppendMenuW(m, MF_STRING, CMD_QUIT as usize, w!("Quit Veyra"));
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);
@@ -55,6 +57,14 @@ pub fn menu(hwnd: HWND, autostart: bool, hidden: bool) -> u32 {
         let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, p.x, p.y, 0, hwnd, None);
         let _ = DestroyMenu(m);
         cmd.0 as u32
+    }
+}
+
+/// Opens a config file in Notepad (always present, and .json may have no default app).
+pub fn edit_file(path: &std::path::Path) {
+    let args = wide(&format!("\"{}\"", path.display()));
+    unsafe {
+        ShellExecuteW(HWND::default(), w!("open"), w!("notepad.exe"), PCWSTR(args.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
     }
 }
 

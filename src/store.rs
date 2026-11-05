@@ -7,13 +7,15 @@ pub struct Water {
     pub bottle_ml: u32,
     pub goal_ml: u32,
     pub interval_min: u32,
+    /// drink reminders on/off
+    pub remind: bool,
     pub date: String,
     pub log: Vec<u32>,
 }
 
 impl Default for Water {
     fn default() -> Self {
-        Water { bottle_ml: 500, goal_ml: 2000, interval_min: 60, date: String::new(), log: Vec::new() }
+        Water { bottle_ml: 500, goal_ml: 2000, interval_min: 60, remind: true, date: String::new(), log: Vec::new() }
     }
 }
 

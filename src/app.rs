@@ -18,12 +18,14 @@ use crate::lyrics::{self, Line};
 use crate::media::{MediaCmd, MediaState};
 use crate::store::{self, Data, Task};
 use crate::util::*;
-use crate::{shelf, sound, system, tray};
+use crate::{shelf, sound, system, theme, tray};
 
 // ------------------------------------------------------------------ style
 
 const T2: C = C(1.0, 1.0, 1.0, 0.62);
 const T3: C = C(1.0, 1.0, 1.0, 0.38);
+/// White that stays white in every theme (exact white is swapped for the theme's text color).
+const PURE_WHITE: C = C(0.9999, 0.9999, 0.9999, 1.0);
 const SURF: C = C(1.0, 1.0, 1.0, 0.08);
 const SURF_H: C = C(1.0, 1.0, 1.0, 0.16);
 const FOCUS_C: C = C::hex(0xFF7A59);
@@ -34,6 +36,17 @@ const SHELF_C: C = C::hex(0xB18CFF);
 const RED: C = C::hex(0xFF5C5C);
 const GREEN: C = C::hex(0x4CD787);
 const MEDIA_C: C = C::hex(0xF2F2F7);
+
+// shelf tiles (DIP); the shelf page is 500 wide with 18 px padding on each side
+const SHELF_TW: f32 = 80.0;
+const SHELF_TH: f32 = 96.0;
+const SHELF_GAP: f32 = 9.0;
+const SHELF_BODY_W: f32 = 500.0 - 36.0;
+
+/// How many shelf tiles fit side by side in a body `w` wide.
+fn shelf_per(w: f32) -> usize {
+    (((w + SHELF_GAP) / (SHELF_TW + SHELF_GAP)).floor() as usize).max(1)
+}
 
 /// Width of the concave fillet joining the notch to the top screen edge (DIP).
 const SHOULDER: f32 = 9.0;
@@ -155,7 +168,6 @@ enum Leave {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Act {
-    Collapse,
     Tab(Tab),
     PlayPause,
     Prev,
@@ -170,6 +182,7 @@ enum Act {
     WaterAdd(u32),
     WaterUndo,
     WaterSet(u8, i32),
+    WaterRemind,
     ShelfItem(usize),
     ShelfRemove(usize),
     ShelfClear,
@@ -358,6 +371,8 @@ pub struct App {
     task_due: Option<i64>,
     task_scroll: usize,
     shelf_scroll: usize,
+    /// animated shelf position (in tiles), slides toward `shelf_scroll`
+    shelf_x: f32,
     drag_hover: bool,
     drag_expanded: bool,
     collapse_at: Option<Instant>,
@@ -397,6 +412,8 @@ pub struct App {
     /// when the cursor entered / left the island
     hover_in: Option<Instant>,
     hover_out: Option<Instant>,
+    /// last seen modification time of theme.json (reloaded when it changes)
+    theme_mtime: Option<std::time::SystemTime>,
 }
 
 fn monitor() -> (i32, i32, f32) {
@@ -414,7 +431,10 @@ fn monitor() -> (i32, i32, f32) {
 impl App {
     pub fn new(hwnd: HWND) -> windows::core::Result<App> {
         let (cx, top, scale) = monitor();
-        let gfx = Gfx::new(scale)?;
+        let mut gfx = Gfx::new(scale)?;
+        theme::ensure_file();
+        let th = theme::load();
+        gfx.set_theme(&th);
         let mut data = store::load();
         let today = now().date();
         if data.water.date != today {
@@ -477,6 +497,7 @@ impl App {
             task_due: None,
             task_scroll: 0,
             shelf_scroll: 0,
+            shelf_x: 0.0,
             drag_hover: false,
             drag_expanded: false,
             collapse_at: None,
@@ -507,6 +528,7 @@ impl App {
             hover_on: false,
             hover_in: None,
             hover_out: None,
+            theme_mtime: theme::modified(),
         };
         Ok(app)
     }
@@ -977,6 +999,16 @@ impl App {
             rem -= s;
         }
         self.view_age += dt;
+        // shelf: slide toward the scroll position (ease-out)
+        self.shelf_scroll = self.shelf_scroll.min(self.shelf_max());
+        let target = self.shelf_scroll as f32;
+        let d = target - self.shelf_x;
+        let shelf_moving = d.abs() > 0.002;
+        if shelf_moving {
+            self.shelf_x += d * (1.0 - (-dt * 13.0).exp());
+        } else {
+            self.shelf_x = target;
+        }
         let mut lyr_moving = false;
         if let Some(c) = self.cur_line() {
             let t = c as f32;
@@ -1012,6 +1044,7 @@ impl App {
             && self.view_age > 0.35
             && self.slide.is_none()
             && !lyr_moving
+            && !shelf_moving
             && hover_still;
         if settled {
             self.sw.snap();
@@ -1112,10 +1145,11 @@ impl App {
         // Attached to the top edge like a notch: extend the shape upward by its radius so
         // only the bottom corners are rounded, then add the concave shoulders.
         let shape = R::new(isl.x, isl.y - rad, isl.w, isl.h + rad);
-        g.rrect(shape, rad, BLACK);
+        let (top, bottom) = (isl.y, isl.y + isl.h);
+        g.rrect_bg(shape, rad, top, bottom);
         let f = SHOULDER.min(isl.h * 0.5);
-        g.shoulder(isl.x, isl.y, f, true, BLACK);
-        g.shoulder(isl.right(), isl.y, f, false, BLACK);
+        g.shoulder_bg(isl.x, isl.y, f, true, top, bottom);
+        g.shoulder_bg(isl.right(), isl.y, f, false, top, bottom);
         let mut alpha = smooth((self.view_age - 0.05) / 0.22);
         if let Some((_, since, _)) = self.leaving {
             // content goes first, then the black shape follows it into the edge
@@ -1145,7 +1179,7 @@ impl App {
         match self.cur_art() {
             Some(b) => g.bitmap(b, r, rad),
             None => {
-                g.rrect(r, rad, SURF_H);
+                g.rrect(r, rad, surf(g, true));
                 g.icon(ic::MUSIC, r, (r.h * 0.45).max(9.0), T2);
             }
         }
@@ -1336,14 +1370,13 @@ impl App {
 
     fn draw_expanded(&self, g: &Gfx, ui: &mut Ui, c: R, tab: Tab, lyr: bool) {
         let inner = R::new(c.x + 18.0, c.y + 12.0, c.w - 36.0, c.h - 26.0);
-        ui.hit(R::new(c.x, c.y, c.w, 40.0), Act::Collapse);
         // tab bar
         for (i, t) in TABS.iter().enumerate() {
             let b = R::new(inner.x + i as f32 * 38.0, inner.y, 34.0, 28.0);
             let hv = ui.hit(b, Act::Tab(*t));
             let active = *t == tab;
             if active || hv {
-                g.rrect(b, 10.0, if active { SURF_H } else { SURF });
+                g.rrect(b, 10.0, surf(g, active));
             }
             let col = if active { tab_color(*t) } else if hv { WHITE } else { T3 };
             draw_tab_icon(g, *t, b, col);
@@ -1430,7 +1463,7 @@ impl App {
         let lb = R::new(col.right() - 32.0, col.y - 2.0, 32.0, 28.0);
         let hv = ui.hit(lb, Act::Lyrics);
         if self.lyrics_open || hv {
-            g.rrect(lb, 10.0, if self.lyrics_open { acc.a(0.22) } else { SURF });
+            g.rrect(lb, 10.0, if self.lyrics_open { acc.a(0.22) } else { surf(g, false) });
         }
         g.icon(ic::LYRICS, lb, 14.0, if self.lyrics_open { acc } else { T2 });
         let tw = col.w - 40.0;
@@ -1456,9 +1489,19 @@ impl App {
             g.rrect(R::new(bar.x, bar.y, (bar.w * f).max(bar.h), bar.h), bar.h / 2.0, if hv { acc } else { acc.a(0.9) });
         }
         if hv {
+            // dot marking how far the song is
+            let dx = bar.x + bar.w * f.clamp(0.0, 1.0);
+            g.circle(dx, bar.cy() + 0.5, 7.5, BLACK.a(0.25));
+            g.circle(dx, bar.cy(), 7.0, PURE_WHITE);
+            // time under the cursor, in a small dark tooltip above the bar
             if let Some((mx, _)) = ui.mouse {
                 let p = ((mx - bar.x) / bar.w).clamp(0.0, 1.0) as f64 * m.dur;
-                g.text(&mmss(p), R::new(mx - 30.0, by - 22.0, 60.0, 14.0), 10.5, 600, WHITE, Al::C);
+                let t = mmss(p);
+                let w = g.measure(&t, 11.5, 600) + 16.0;
+                let tx = (mx - w / 2.0).clamp(bx - 6.0, bx + bw - w + 6.0);
+                let tip = R::new(tx, by - 30.0, w, 22.0);
+                g.rrect(tip, 6.0, C(0.17, 0.17, 0.18, 0.96));
+                g.text(&t, tip, 11.5, 600, PURE_WHITE, Al::C);
             }
         }
         g.text(&mmss(pos), R::new(bx, by + 8.0, 60.0, 14.0), 11.0, 500, T3, Al::L);
@@ -1567,8 +1610,9 @@ impl App {
         };
         let b = R::new(x, by, 118.0, 34.0);
         let hv = ui.hit(b, Act::FocusToggle);
-        g.rrect(b, 17.0, if hv { col } else { col.a(0.85) });
-        g.text(btxt, b, 13.0, 600, BLACK, Al::C);
+        let ac = accent_btn(g, col);
+        g.rrect(b, 17.0, if hv { ac } else { ac.a(0.85) });
+        g.text(btxt, b, 13.0, 600, accent_fg(g), Al::C);
         icon_btn(g, ui, R::new(x + 126.0, by, 34.0, 34.0), ic::RESET, 14.0, WHITE, Act::FocusReset, true);
         icon_btn(g, ui, R::new(x + 166.0, by, 34.0, 34.0), ic::NEXT, 14.0, WHITE, Act::FocusSkip, true);
 
@@ -1615,15 +1659,31 @@ impl App {
         }
         let note = match self.next_water_in() {
             None => "Daily goal reached — nice work!".to_string(),
+            Some(_) if !w.remind => format!("Reminders off · {} drinks today", w.log.len()),
             Some(m) => format!("Next reminder in {m} min · {} drinks today", w.log.len()),
         };
+        // reminders on/off: a small switch at the top right
+        {
+            let on = w.remind;
+            let sr = R::new(c.right() - 112.0, c.y + 2.0, 112.0, 24.0);
+            let hv = ui.hit(sr, Act::WaterRemind);
+            if hv {
+                g.rrect(sr, 12.0, surf(g, false));
+            }
+            g.text("Reminders", R::new(sr.x + 8.0, sr.y, 64.0, sr.h), 11.5, 500, btn_fg(g, if on { T2 } else { T3 }), Al::L);
+            let track = R::new(sr.right() - 38.0, sr.cy() - 8.0, 30.0, 16.0);
+            g.rrect(track, 8.0, if on { accent_btn(g, WATER_C) } else { WHITE.a(0.22) });
+            let kx = if on { track.right() - 8.0 } else { track.x + 8.0 };
+            g.circle(kx, track.cy(), 6.0, if on { accent_fg(g) } else { WHITE.a(0.9) });
+        }
         g.text(&note, R::new(x, c.y + 44.0, cw, 18.0), 11.5, 400, T3, Al::L);
 
         let by = c.y + 68.0;
         let b1 = R::new(x, by, 86.0, 32.0);
-        pill_btn(g, ui, b1, "+250 ml", WHITE, SURF, Act::WaterAdd(250));
+        let hv1 = ui.hover(b1);
+        pill_btn(g, ui, b1, "+250 ml", btn_fg(g, WHITE), surf(g, hv1), Act::WaterAdd(250));
         let b2 = R::new(x + 94.0, by, 150.0, 32.0);
-        pill_btn(g, ui, b2, &format!("+ Bottle · {} ml", w.bottle_ml), BLACK, WATER_C, Act::WaterAdd(w.bottle_ml));
+        pill_btn(g, ui, b2, &format!("+ Bottle · {} ml", w.bottle_ml), accent_fg(g), accent_btn(g, WATER_C), Act::WaterAdd(w.bottle_ml));
         let mut cx2 = x + 252.0;
         if !w.log.is_empty() {
             icon_btn(g, ui, R::new(cx2, by, 34.0, 32.0), ic::UNDO, 14.0, WHITE, Act::WaterUndo, true);
@@ -1646,7 +1706,7 @@ impl App {
                 }
             }
             None => {
-                g.rrect(cr, 16.0, if ch { SURF_H } else { SURF });
+                g.rrect(cr, 16.0, surf(g, ch));
                 g.text("Custom", cr, 12.5, 600, T2, Al::C);
             }
         }
@@ -1677,19 +1737,34 @@ impl App {
             g.text("Keep files handy, then drag them out into chats, emails or folders", R::new(r.x, r.y + 78.0, r.w, 18.0), 11.5, 400, T3, Al::C);
             return;
         }
-        let (tw, th, gap) = (80.0, 96.0, 9.0);
-        let per = ((c.w + gap) / (tw + gap)).floor() as usize;
-        let start = self.shelf_scroll.min(files.len().saturating_sub(per));
-        for (k, path) in files.iter().enumerate().skip(start).take(per) {
-            let i = k - start;
-            let t = R::new(c.x + i as f32 * (tw + gap), c.y, tw, th);
-            let hv = ui.hit(t, Act::ShelfItem(k));
+        let (tw, th, gap) = (SHELF_TW, SHELF_TH, SHELF_GAP);
+        let per = shelf_per(c.w);
+        // tiles slide sideways when scrolling: draw every tile that is at least partly
+        // visible, clipped to the shelf row; only fully visible tiles take clicks
+        let pos = self.shelf_x.clamp(0.0, files.len().saturating_sub(per) as f32);
+        let first = pos.floor() as usize;
+        let row = R::new(c.x, c.y - 2.0, (per as f32) * (tw + gap) - gap, th + 4.0);
+        g.push_rr(row, 14.0, 1.0);
+        for (k, path) in files.iter().enumerate().skip(first).take(per + 1) {
+            let off = k as f32 - pos;
+            let t = R::new(c.x + off * (tw + gap), c.y, tw, th);
+            let whole = off > -0.02 && off < per as f32 - 0.98;
+            // fade tiles as they slide out of the row
+            let fade = if whole { 1.0 } else { (1.0 - (off.min(0.0).abs()).max((off - (per as f32 - 1.0)).max(0.0))).clamp(0.0, 1.0) };
+            if fade <= 0.01 {
+                continue;
+            }
+            let layered = fade < 0.999;
+            if layered {
+                g.push_rr(R::new(-1e4, -1e4, 2e4, 2e4), 0.0, fade);
+            }
+            let hv = if whole { ui.hit(t, Act::ShelfItem(k)) } else { false };
             let sel = self.shelf_sel.contains(path);
             if sel {
                 g.rrect(t, 14.0, if hv { SHELF_C.a(0.28) } else { SHELF_C.a(0.16) });
                 g.rrect_stroke(t.inset(0.75, 0.75), 13.5, SHELF_C.a(0.85), 1.5, false);
             } else {
-                g.rrect(t, 14.0, if hv { SURF_H } else { SURF });
+                g.rrect(t, 14.0, surf(g, hv));
             }
             let name = std::path::Path::new(path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or(path.clone());
             let is_dir = std::path::Path::new(path).is_dir();
@@ -1730,6 +1805,19 @@ impl App {
                 g.circle(xr.cx(), xr.cy(), 9.0, if xh { RED } else { BLACK.a(0.7) });
                 g.icon(ic::CLOSE, xr, 8.0, WHITE);
             }
+            if layered {
+                g.pop();
+            }
+        }
+        g.pop();
+        // scroll position: a thin bar under the row when not everything fits
+        if files.len() > per {
+            let track = R::new(row.x, c.y + th + 3.0, row.w, 2.0);
+            g.rrect(track, 1.0, WHITE.a(0.12));
+            let span = files.len() as f32;
+            let tw2 = track.w * per as f32 / span;
+            let tx = track.x + (track.w - tw2) * (pos / (span - per as f32)).clamp(0.0, 1.0);
+            g.rrect(R::new(tx, track.y, tw2, 2.0), 1.0, WHITE.a(0.55));
         }
         let fy = c.y + th + 8.0;
         let nsel = files.iter().filter(|f| self.shelf_sel.contains(f)).count();
@@ -1745,16 +1833,17 @@ impl App {
         let dr = R::new(c.right() - 74.0 - 8.0 - 100.0, fy - 2.0, 100.0, 24.0);
         let hv = ui.hit(dr, Act::ShelfAll);
         if nsel > 0 {
-            g.rrect(dr, 12.0, if hv { SHELF_C.mix(WHITE, 0.2) } else { SHELF_C });
-            g.text("Deselect", dr, 11.5, 700, BLACK, Al::C);
+            let ac = accent_btn(g, SHELF_C);
+            g.rrect(dr, 12.0, if hv { ac.mix(WHITE, 0.2) } else { ac });
+            g.text("Deselect", dr, 11.5, 700, accent_fg(g), Al::C);
         } else {
             g.rrect(dr, 12.0, if hv { SHELF_C.a(0.35) } else { SHELF_C.a(0.18) });
             g.text(&format!("Drag all ({})", files.len()), dr, 11.5, 600, SHELF_C.mix(WHITE, 0.35), Al::C);
         }
         let cr = R::new(c.right() - 74.0, fy - 2.0, 74.0, 24.0);
         let hv = ui.hit(cr, Act::ShelfClear);
-        g.rrect(cr, 12.0, if hv { RED.a(0.25) } else { SURF });
-        g.text("Clear all", cr, 11.5, 600, if hv { RED } else { T2 }, Al::C);
+        g.rrect(cr, 12.0, if hv { RED.a(0.25) } else { surf(g, false) });
+        g.text("Clear all", cr, 11.5, 600, if hv { RED } else { btn_fg(g, T2) }, Al::C);
         if self.drag_hover {
             g.rrect_stroke(c.inset(-4.0, -4.0), 16.0, SHELF_C, 1.5, true);
         }
@@ -1826,6 +1915,11 @@ impl App {
         self.kick();
     }
 
+    /// Furthest the shelf can scroll (first visible tile index).
+    fn shelf_max(&self) -> usize {
+        self.data.shelf.len().saturating_sub(shelf_per(SHELF_BODY_W))
+    }
+
     fn toggle_sel(&mut self, i: usize) {
         if let Some(p) = self.data.shelf.get(i).cloned() {
             if let Some(pos) = self.shelf_sel.iter().position(|x| *x == p) {
@@ -1851,7 +1945,7 @@ impl App {
         // input row
         let field = R::new(c.x, c.y, c.w - 178.0, 32.0);
         let hv = ui.hit(field, Act::TaskField);
-        g.rrect(field, 10.0, if self.input_focus { WHITE.a(0.12) } else if hv { SURF_H } else { SURF });
+        g.rrect(field, 10.0, if self.input_focus { WHITE.a(0.12) } else { surf(g, hv) });
         if self.input_focus {
             g.rrect_stroke(field, 10.0, TASK_C.a(0.6), 1.2, false);
         }
@@ -1871,7 +1965,7 @@ impl App {
         }
         // time chip
         let tr = R::new(field.right() + 8.0, c.y, 128.0, 32.0);
-        g.rrect(tr, 10.0, SURF);
+        g.rrect(tr, 10.0, surf(g, false));
         let mr = R::new(tr.x, tr.y, 30.0, 32.0);
         let pr = R::new(tr.right() - 30.0, tr.y, 30.0, 32.0);
         let mid = R::new(tr.x + 30.0, tr.y, tr.w - 60.0, 32.0);
@@ -1887,8 +1981,9 @@ impl App {
         }
         let ar = R::new(c.right() - 34.0, c.y, 34.0, 32.0);
         let ah = ui.hit(ar, Act::TaskAdd);
-        g.rrect(ar, 10.0, if ah { TASK_C } else { TASK_C.a(0.85) });
-        g.icon(ic::ADD, ar, 13.0, BLACK);
+        let ac = accent_btn(g, TASK_C);
+        g.rrect(ar, 10.0, if ah { ac } else { ac.a(0.85) });
+        g.icon(ic::ADD, ar, 13.0, accent_fg(g));
 
         // list
         let tasks = self.sorted_tasks();
@@ -1964,7 +2059,6 @@ impl App {
             self.input_focus = false;
         }
         match a {
-            Act::Collapse => self.collapse(),
             Act::Tab(t) => {
                 self.shelf_sel.clear();
                 self.tab = t;
@@ -2049,6 +2143,13 @@ impl App {
                 if before < w.goal_ml && w.total() >= w.goal_ml {
                     sound::chime();
                 }
+            }
+            Act::WaterRemind => {
+                let w = &mut self.data.water;
+                w.remind = !w.remind;
+                // turning them back on starts a fresh interval instead of pinging right away
+                self.water_mark = Instant::now();
+                self.dirty = true;
             }
             Act::WaterUndo => {
                 self.data.water.log.pop();
@@ -2339,7 +2440,7 @@ impl App {
         // water reminder (07:00–22:59)
         let w = &self.data.water;
         let iv = Duration::from_secs(w.interval_min as u64 * 60);
-        if (7..23).contains(&t.h) && w.total() < w.goal_ml && self.water_mark.elapsed() >= iv {
+        if w.remind && (7..23).contains(&t.h) && w.total() < w.goal_ml && self.water_mark.elapsed() >= iv {
             self.water_mark = Instant::now();
             let msg = format!("{} / {} ml today · tap to log", w.total(), w.goal_ml);
             sound::chime();
@@ -2367,6 +2468,13 @@ impl App {
 
         // hide during full-screen apps / presentations
         self.apply_visibility();
+
+        // theme.json edited: apply the new colors right away
+        let m = theme::modified();
+        if m != self.theme_mtime {
+            self.theme_mtime = m;
+            self.reload_theme();
+        }
 
         if self.dirty {
             self.save_now();
@@ -2474,6 +2582,8 @@ impl App {
                             self.data.shelf.push(f);
                         }
                     }
+                    // slide to the end so the newly added files come into view
+                    self.shelf_scroll = self.shelf_max();
                     self.dirty = true;
                     if self.drag_expanded {
                         self.collapse_at = Some(Instant::now() + Duration::from_millis(2500));
@@ -2569,6 +2679,9 @@ impl App {
                 };
                 if matches!(a, Act::ShelfItem(_) | Act::ShelfAll) {
                     self.press = None;
+                    unsafe {
+                        let _ = ReleaseCapture();
+                    }
                     if !paths.is_empty() {
                         self.shelf_sel.clear();
                         self.deferred = Some(Deferred::DragOut(paths));
@@ -2586,12 +2699,29 @@ impl App {
         self.kick();
     }
 
-    /// Buttons fire on press (snappy, and immune to the layout shifting under a
-    /// still cursor). Shelf tiles wait for release so they can be dragged out.
+    /// Everything fires on release (like a normal button): pressing only remembers what is
+    /// under the cursor, and the action runs when the button is released over the same thing.
+    /// Holding the mouse down therefore never opens the island or triggers a button, and
+    /// sliding off before releasing cancels. Shelf tiles can be dragged out while held.
     pub fn on_ldown(&mut self, lp: LPARAM) {
         let p = self.local(lp);
         self.mouse = Some(p);
-        let hit = self.hit_at(p);
+        self.press = Some((self.hit_at(p), p.0, p.1));
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+    }
+
+    pub fn on_lup(&mut self, lp: LPARAM) {
+        let p = self.local(lp);
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        let Some((hit, _, _)) = self.press.take() else { return };
+        // released somewhere else than where it was pressed: cancel
+        if !self.cursor_inside() || self.hit_at(p) != hit {
+            return;
+        }
         if !self.expanded {
             match hit {
                 Some(Act::VolBar(r)) => self.act(Act::VolBar(r), p.0),
@@ -2606,22 +2736,11 @@ impl App {
             return;
         }
         match hit {
-            Some(a @ (Act::ShelfItem(_) | Act::ShelfAll)) => self.press = Some((Some(a), p.0, p.1)),
             Some(a) => self.act(a, p.0),
             None => {
                 self.input_focus = false;
                 self.commit_edit();
                 self.kick();
-            }
-        }
-    }
-
-    pub fn on_lup(&mut self, lp: LPARAM) {
-        let p = self.local(lp);
-        // released without dragging: a click (open the file / toggle "select all")
-        if let Some((Some(a @ (Act::ShelfItem(_) | Act::ShelfAll)), _, _)) = self.press.take() {
-            if self.hit_at(p) == Some(a) {
-                self.act(a, p.0);
             }
         }
     }
@@ -2667,7 +2786,7 @@ impl App {
             }
             (Tab::Shelf, _) => {
                 if steps < 0 {
-                    self.shelf_scroll = (self.shelf_scroll + 1).min(self.data.shelf.len().saturating_sub(1));
+                    self.shelf_scroll = (self.shelf_scroll + 1).min(self.shelf_max());
                 } else {
                     self.shelf_scroll = self.shelf_scroll.saturating_sub(1);
                 }
@@ -2770,8 +2889,22 @@ impl App {
         self.kick();
     }
 
+    fn reload_theme(&mut self) {
+        let th = theme::load();
+        self.gfx.set_theme(&th);
+        dbg_log("theme reloaded");
+        self.kick();
+        if !self.hidden {
+            self.render();
+        }
+    }
+
     pub fn tray_cmd(&mut self, cmd: u32) {
-        if cmd == tray::CMD_AUTOSTART {
+        if cmd == tray::CMD_THEME {
+            if let Some(p) = theme::ensure_file() {
+                tray::edit_file(&p);
+            }
+        } else if cmd == tray::CMD_AUTOSTART {
             self.autostart = !self.autostart;
             tray::set_autostart(self.autostart);
         } else if cmd == tray::CMD_HIDE {
@@ -2858,12 +2991,45 @@ fn draw_battery(g: &Gfx, x: f32, cy: f32, w: f32, h: f32, f: f32, charging: bool
     g.rrect(R::new(inner.x, inner.y, (inner.w * f.clamp(0.04, 1.0)).max(1.5), inner.h), 1.5, col);
 }
 
+/// Background of a regular button (theme.conf `button` / `button_hover`).
+fn surf(g: &Gfx, hover: bool) -> C {
+    let t = &g.theme;
+    match (hover, t.button, t.button_hover) {
+        (true, _, Some(h)) => h,
+        (true, Some(b), None) => b.mix(t.fg, 0.18),
+        (true, None, None) => SURF_H,
+        (false, Some(b), _) => b,
+        (false, None, _) => SURF,
+    }
+}
+
+/// Text / icon color on a regular button (theme.conf `button_text`), keeping `c`'s transparency.
+fn btn_fg(g: &Gfx, c: C) -> C {
+    match g.theme.button_text {
+        Some(t) => g.text_alpha(C(t.0, t.1, t.2, t.3 * c.3)),
+        None => c,
+    }
+}
+
+/// Fill of a main button: the feature's color unless theme.conf sets `button_accent`.
+fn accent_btn(g: &Gfx, feature: C) -> C {
+    g.theme.button_accent.unwrap_or(feature)
+}
+
+/// Text on a main button: black, or white when a custom `button_accent` is dark.
+fn accent_fg(g: &Gfx) -> C {
+    match g.theme.button_accent {
+        Some(a) if crate::theme::luma(std::iter::once(a)) < 0.5 => C(0.9999, 0.9999, 0.9999, 1.0),
+        _ => BLACK,
+    }
+}
+
 fn icon_btn(g: &Gfx, ui: &mut Ui, r: R, ch: char, size: f32, col: C, act: Act, bg: bool) {
     let hv = ui.hit(r, act);
     if hv || bg {
-        g.rrect(r, (r.h / 2.0).min(11.0), if hv { SURF_H } else { SURF });
+        g.rrect(r, (r.h / 2.0).min(11.0), surf(g, hv));
     }
-    g.icon(ch, r, size, col);
+    g.icon(ch, r, size, btn_fg(g, col));
 }
 
 fn pill_btn(g: &Gfx, ui: &mut Ui, r: R, text: &str, fg: C, bg: C, act: Act) {
@@ -2881,19 +3047,19 @@ fn stepper(g: &Gfx, ui: &mut Ui, x: f32, y: f32, label: &str, val: &str, minus: 
     let bx = x + lw;
     let box_w = 108.0;
     let b = R::new(bx, y, box_w, 26.0);
-    g.rrect(b, 9.0, SURF);
+    g.rrect(b, 9.0, surf(g, false));
     let mr = R::new(bx, y, 26.0, 26.0);
     let pr = R::new(bx + box_w - 26.0, y, 26.0, 26.0);
     let mh = ui.hit(mr, minus);
     let ph = ui.hit(pr, plus);
     if mh {
-        g.rrect(mr, 9.0, SURF_H);
+        g.rrect(mr, 9.0, surf(g, true));
     }
     if ph {
-        g.rrect(pr, 9.0, SURF_H);
+        g.rrect(pr, 9.0, surf(g, true));
     }
-    g.icon(ic::MINUS, mr, 9.0, if mh { WHITE } else { T2 });
-    g.icon(ic::ADD, pr, 9.0, if ph { WHITE } else { T2 });
+    g.icon(ic::MINUS, mr, 9.0, btn_fg(g, if mh { WHITE } else { T2 }));
+    g.icon(ic::ADD, pr, 9.0, btn_fg(g, if ph { WHITE } else { T2 }));
     let vr = R::new(bx + 26.0, y, box_w - 52.0, 26.0);
     let vh = ui.hit(vr, Act::Edit(field));
     value_box(g, vr, val, edit, vh, 11.5);
@@ -2917,7 +3083,7 @@ fn value_box(g: &Gfx, r: R, val: &str, edit: Option<(&str, bool)>, hover: bool, 
             if hover {
                 g.rrect(r.inset(0.0, 2.0), 7.0, WHITE.a(0.08));
             }
-            g.text(val, r, size, 600, WHITE, Al::C);
+            g.text(val, r, size, 600, btn_fg(g, WHITE), Al::C);
         }
     }
 }

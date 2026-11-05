@@ -58,6 +58,13 @@ pub struct Gfx {
     dw: IDWriteFactory,
     rt: ID2D1DCRenderTarget,
     brush: ID2D1SolidColorBrush,
+    /// island background: a solid color, or a vertical gradient brush (theme.json)
+    bg_solid: Cell<C>,
+    bg_grad: Option<ID2D1LinearGradientBrush>,
+    /// replaces pure white (text, icons, translucent surfaces) so light themes stay readable
+    fg: Cell<C>,
+    /// the current UI colors (theme.conf)
+    pub theme: crate::theme::Theme,
     layers: Vec<ID2D1Layer>,
     depth: Cell<usize>,
     round: ID2D1StrokeStyle,
@@ -100,7 +107,7 @@ impl Gfx {
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let brush = rt.CreateSolidColorBrush(&WHITE.d2d(), None)?;
             let mut layers = Vec::new();
-            for _ in 0..4 {
+            for _ in 0..6 {
                 layers.push(rt.CreateLayer(None)?);
             }
             let mut sp = D2D1_STROKE_STYLE_PROPERTIES {
@@ -134,6 +141,10 @@ impl Gfx {
                 dw,
                 rt,
                 brush,
+                bg_solid: Cell::new(BLACK),
+                bg_grad: None,
+                fg: Cell::new(WHITE),
+                theme: crate::theme::Theme::default(),
                 layers,
                 depth: Cell::new(0),
                 round,
@@ -294,8 +305,52 @@ impl Gfx {
     }
 
     fn b(&self, c: C) -> &ID2D1SolidColorBrush {
+        let c = if c.0 == 1.0 && c.1 == 1.0 && c.2 == 1.0 {
+            let f = self.fg.get();
+            C(f.0, f.1, f.2, f.3 * c.3)
+        } else {
+            c
+        };
         unsafe { self.brush.SetColor(&c.d2d()) };
         &self.brush
+    }
+
+    /// Island colors: `bg` stops run from the bottom (0.0) to the top (1.0).
+    pub fn set_theme(&mut self, th: &crate::theme::Theme) {
+        self.theme = th.clone();
+        let (bg, fg) = (&th.bg, th.fg);
+        self.fg.set(fg);
+        self.bg_grad = None;
+        self.bg_solid.set(bg.first().map(|s| s.1).unwrap_or(BLACK));
+        if bg.len() < 2 {
+            return;
+        }
+        let stops: Vec<D2D1_GRADIENT_STOP> = bg.iter().map(|(p, c)| D2D1_GRADIENT_STOP { position: *p, color: c.d2d() }).collect();
+        unsafe {
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(0.0, 1.0), endPoint: pt(0.0, 0.0) };
+            self.bg_grad = self.rt.CreateLinearGradientBrush(&props, None, &coll).ok();
+        }
+    }
+
+    /// The background paint, with the gradient spanning `top`..`bottom` (DIP).
+    fn bg(&self, top: f32, bottom: f32) -> ID2D1Brush {
+        match &self.bg_grad {
+            Some(g) => unsafe {
+                g.SetStartPoint(pt(0.0, bottom));
+                g.SetEndPoint(pt(0.0, top));
+                g.cast().unwrap()
+            },
+            None => unsafe {
+                self.brush.SetColor(&self.bg_solid.get().d2d());
+                self.brush.cast().unwrap()
+            },
+        }
+    }
+
+    /// Fills the island shape with the theme background (gradient from `bottom` up to `top`).
+    pub fn rrect_bg(&self, r: R, rad: f32, top: f32, bottom: f32) {
+        unsafe { self.rt.FillRoundedRectangle(&rr(r, rad), &self.bg(top, bottom)) }
     }
 
     pub fn rrect(&self, r: R, rad: f32, c: C) {
@@ -389,14 +444,20 @@ impl Gfx {
     /// Concave fillet next to a top-attached shape: a `f`×`f` square at the top edge
     /// with a quarter circle cut out, so the notch flows smoothly into the screen edge.
     /// `x` is the shape's left edge (left = true) or right edge (left = false).
-    pub fn shoulder(&self, x: f32, y: f32, f: f32, left: bool, c: C) {
+    pub fn shoulder_bg(&self, x: f32, y: f32, f: f32, left: bool, top: f32, bottom: f32) {
+        if let Some(geo) = self.shoulder_geo(x, y, f, left) {
+            unsafe { self.rt.FillGeometry(&geo, &self.bg(top, bottom), None) }
+        }
+    }
+
+    fn shoulder_geo(&self, x: f32, y: f32, f: f32, left: bool) -> Option<ID2D1PathGeometry> {
         if f < 0.5 {
-            return;
+            return None;
         }
         let o = if left { x - f } else { x + f };
         unsafe {
-            let Ok(geo) = self.factory.CreatePathGeometry() else { return };
-            let Ok(sink) = geo.Open() else { return };
+            let geo = self.factory.CreatePathGeometry().ok()?;
+            let sink = geo.Open().ok()?;
             sink.BeginFigure(pt(o, y), D2D1_FIGURE_BEGIN_FILLED);
             sink.AddLine(pt(x, y));
             sink.AddLine(pt(x, y + f));
@@ -408,9 +469,8 @@ impl Gfx {
                 arcSize: D2D1_ARC_SIZE_SMALL,
             });
             sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-            if sink.Close().is_ok() {
-                self.rt.FillGeometry(&geo, self.b(c), None);
-            }
+            sink.Close().ok()?;
+            Some(geo)
         }
     }
 
@@ -466,7 +526,18 @@ impl Gfx {
         }
     }
 
+    /// Faded text/icons get firmer with the theme's `text_contrast`.
+    pub fn text_alpha(&self, c: C) -> C {
+        let k = self.theme.text_contrast;
+        if k > 0.0 && c.3 < 1.0 {
+            C(c.0, c.1, c.2, c.3 + (1.0 - c.3) * k)
+        } else {
+            c
+        }
+    }
+
     fn draw_text(&self, s: &str, r: R, f: &IDWriteTextFormat, c: C) {
+        let c = self.text_alpha(c);
         let w: Vec<u16> = s.encode_utf16().collect();
         unsafe {
             self.rt.DrawText(&w, f, &r.d2d(), self.b(c), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);

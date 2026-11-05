@@ -12,6 +12,7 @@ mod shelf;
 mod sound;
 mod store;
 mod system;
+mod theme;
 mod tray;
 mod util;
 mod vsync;
