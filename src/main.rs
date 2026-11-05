@@ -14,6 +14,7 @@ mod store;
 mod system;
 mod tray;
 mod util;
+mod vsync;
 
 use std::cell::RefCell;
 use std::sync::atomic::Ordering;
@@ -104,6 +105,7 @@ fn main() {
             Err(_) => return,
         };
         APP.with(|a| *a.borrow_mut() = Some(app));
+        vsync::start(hwnd);
 
         shelf::register(hwnd);
         install::ensure();
@@ -166,6 +168,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         tray::add(hwnd, HICON(ICON.with(|c| c.get()) as *mut _));
         return LRESULT(0);
     }
+    if msg == vsync::WM_APP_FRAME {
+        // let the pacing thread queue the next refresh while this one renders
+        vsync::frame_done();
+    }
     let handled: Option<(Option<LRESULT>, Option<Deferred>)> = with_app(|app| {
         let r = match msg {
             WM_TIMER => {
@@ -173,6 +179,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     1 => app.frame(),
                     _ => app.tick(),
                 }
+                Some(LRESULT(0))
+            }
+            vsync::WM_APP_FRAME => {
+                app.frame();
                 Some(LRESULT(0))
             }
             app::WM_APP_SHOW => {

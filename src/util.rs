@@ -117,3 +117,17 @@ pub fn mmss(secs: f64) -> String {
         format!("{}:{:02}", s / 60, s % 60)
     }
 }
+
+/// Hand freed heap blocks and idle pages back to Windows. Called once the island has
+/// settled back into its small resting shape; anything still needed is paged back in
+/// on the next frame (soft faults, no disk I/O).
+pub fn trim_memory() {
+    use windows::Win32::System::Memory::{GetProcessHeap, HeapCompact, HEAP_FLAGS};
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+    unsafe {
+        if let Ok(h) = GetProcessHeap() {
+            let _ = HeapCompact(h, HEAP_FLAGS(0));
+        }
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}

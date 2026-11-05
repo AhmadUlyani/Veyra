@@ -1,7 +1,9 @@
 # Veyra
 
 A lightweight Dynamic Island for Windows, written in Rust (pure Win32 + Direct2D, no webview).
-Uses ~8 MB private memory and ~0.1% CPU while idle. The single `.exe` is about 560 KB.
+Uses a few MB of memory and ~0.1% CPU while idle (buffers and idle pages are handed back to
+Windows a few seconds after the island returns to its small shape). Animations are paced to the
+display's refresh rate (60/120/144/165 Hz…) by waiting for vertical blank. The single `.exe` is about 560 KB.
 
 ## Features
 
@@ -39,7 +41,7 @@ This runs `cargo build --release` and stamps the generated logo into `target\rel
 
 Or just double-click `rebuild.bat`: it closes the running Veyra, builds, and starts the new build.
 
-For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|toast|volume|focuspill|caps|capsoff`
+For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|toast|volume|focuspill|caps|capsoff|tws|charging`
 opens a specific view on start (demo mode never saves data). `VEYRA_DEBUG=1` writes a log to `%TEMP%\veyra.log`.
 `veyra.exe --quit` asks a running Veyra to close (with its closing animation, saving data first).
 

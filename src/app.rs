@@ -119,11 +119,28 @@ const TASK_SOON_MIN: i64 = 15;
 const CLOCK_SIZE: f32 = 18.5;
 /// Width of the closed island when nothing is going on: just an empty black notch.
 const IDLE_W: f32 = 110.0;
+// hover on the closed island: how much it grows, and the intent delays that keep a cursor just
+// passing by (on its way to a browser tab) from waking it, and stop flicker at the edge
+const HOVER_W: f32 = 16.0;
+const HOVER_H: f32 = 4.0;
+const HOVER_IN: Duration = Duration::from_millis(60);
+const HOVER_OUT: Duration = Duration::from_millis(120);
+/// critically damped (no overshoot): settles in ~180 ms growing, ~250 ms shrinking
+const HOVER_W_IN: f32 = 26.0;
+const HOVER_W_OUT: f32 = 18.0;
 // one-line toasts (Caps Lock)
 const SHORT_H: f32 = 34.0;
 const SHORT_PAD: f32 = 12.0;
 const SHORT_ICON: f32 = 18.0;
 const SHORT_SIZE: f32 = 13.0;
+// two-line notices (Wi-Fi, headphones/TWS, charger, reminders): sized to their text
+const TWO_H: f32 = 46.0;
+const TWO_PAD: f32 = 9.0;
+const TWO_ICON: f32 = 28.0;
+const TWO_GAP: f32 = 9.0;
+const TWO_TITLE: f32 = 13.5;
+const TWO_SUB: f32 = 11.5;
+const TWO_MAX_W: f32 = 380.0;
 /// Launch / quit / hide transition: the island grows out of (or sinks back into) the top edge.
 /// Width the island starts from / shrinks to, as a fraction of its resting width.
 const POP_W: f32 = 0.45;
@@ -366,6 +383,20 @@ pub struct App {
     pub autostart: bool,
     /// closing animation in progress: what to do at the end, when it started, target width
     leaving: Option<(Leave, Instant, f32)>,
+    /// when to hand buffers and idle pages back to Windows after the island got small again
+    trim_at: Option<Instant>,
+    /// start and frame count of the running animation (debug log)
+    anim_stat: (Instant, u32),
+    /// the running animation changed what is shown (not just a hover): trim memory afterwards
+    anim_view_change: bool,
+    /// hover progress 0..1 and its velocity, driven by its own spring
+    hov: f32,
+    hov_v: f32,
+    /// hover as decided after the intent delays
+    hover_on: bool,
+    /// when the cursor entered / left the island
+    hover_in: Option<Instant>,
+    hover_out: Option<Instant>,
 }
 
 fn monitor() -> (i32, i32, f32) {
@@ -468,6 +499,14 @@ impl App {
             deferred: None,
             autostart: tray::autostart_enabled(),
             leaving: None,
+            trim_at: Some(n + Duration::from_secs(5)),
+            anim_stat: (n, 0),
+            anim_view_change: false,
+            hov: 0.0,
+            hov_v: 0.0,
+            hover_on: false,
+            hover_in: None,
+            hover_out: None,
         };
         Ok(app)
     }
@@ -586,6 +625,8 @@ impl App {
             "focuspill" => self.start_phase(PMode::Focus),
             "caps" => self.toast(TIcon::Txt("⇪".into()), "Caps Lock on", "", 600.0, GREEN, None),
             "capsoff" => self.toast(TIcon::Txt("⇪".into()), "Caps Lock off", "", 600.0, WHITE, None),
+            "tws" => self.toast(TIcon::G(ic::HEADPHONE), "Headphones connected", "Galaxy Buds2 Pro", 600.0, WHITE, None),
+            "charging" => self.toast(TIcon::Battery(0.64, true), "Charging", "64% · plugged in", 600.0, GREEN, None),
             "idle" => self.demo_idle = true,
             "editwater" => {
                 self.expand(Some(Tab::Water));
@@ -631,7 +672,13 @@ impl App {
         if !self.anim_on {
             self.anim_on = true;
             self.last_frame = Instant::now();
-            unsafe { SetTimer(self.hwnd, TIMER_ANIM, 15, None) };
+            self.anim_stat = (self.last_frame, 0);
+            if crate::vsync::available() {
+                // paced to the display's refresh rate
+                crate::vsync::run(true);
+            } else {
+                unsafe { SetTimer(self.hwnd, TIMER_ANIM, 15, None) };
+            }
         }
     }
 
@@ -815,17 +862,15 @@ impl App {
                     let w = SHORT_PAD + SHORT_ICON + 8.0 + self.gfx.measure(&t.title, SHORT_SIZE, 600) + SHORT_PAD + 4.0;
                     return (w, SHORT_H, SHORT_H / 2.0, ViewKey::Toast(t.id));
                 }
-                return (370.0, 58.0, 22.0, ViewKey::Toast(t.id));
+                let text = self.gfx.measure(&t.title, TWO_TITLE, 600).max(self.gfx.measure(&t.sub, TWO_SUB, 400));
+                let w = (TWO_PAD + TWO_ICON + TWO_GAP + text + TWO_PAD + 8.0).clamp(150.0, TWO_MAX_W);
+                return (w, TWO_H, 20.0, ViewKey::Toast(t.id));
             }
         }
         let (live, sec) = self.lives();
-        let mut w = self.compact_width(live) + self.segment_width(sec);
-        let mut h = PILL_H;
-        if self.mouse.is_some() || self.drag_hover {
-            w += 10.0;
-            h += 3.0;
-        }
-        (w, h, 13.0, ViewKey::Compact(live))
+        // hover growth is added on top in render(), driven by its own spring
+        let w = self.compact_width(live) + self.segment_width(sec);
+        (w, PILL_H, 13.0, ViewKey::Compact(live))
     }
 
     /// (primary activity, optional secondary activity shown at the right end of the island)
@@ -889,8 +934,11 @@ impl App {
         let n = Instant::now();
         let dt = (n - self.last_frame).as_secs_f32().min(1.0 / 30.0);
         self.last_frame = n;
+        self.anim_stat.1 += 1;
         let (tw, th, tr, key) = self.target();
+        let hover_still = self.step_hover(n, dt, key);
         if key != self.view {
+            self.anim_view_change = true;
             match (self.view, key) {
                 // switching feature while open: slide instead of fade
                 (ViewKey::Expanded(a, al), ViewKey::Expanded(b, _)) if a != b && self.view_age > 0.05 => {
@@ -963,22 +1011,77 @@ impl App {
             && self.sr.done()
             && self.view_age > 0.35
             && self.slide.is_none()
-            && !lyr_moving;
+            && !lyr_moving
+            && hover_still;
         if settled {
             self.sw.snap();
             self.sh.snap();
             self.sr.snap();
             self.anim_on = false;
+            crate::vsync::run(false);
+            let (t0, frames) = self.anim_stat;
+            let view_changed = std::mem::take(&mut self.anim_view_change);
+            let secs = n.duration_since(t0).as_secs_f32();
+            if frames > 10 {
+                dbg_log(&format!("anim: {frames} frames in {:.0} ms ({:.0} fps)", secs * 1000.0, frames as f32 / secs));
+                // a real animation (hover, notice, collapse) paged things back in: trim again
+                // a little after the island comes to rest (single redraws don't count)
+                // (a hover alone doesn't count: the next hover would stutter paging it back in)
+                if view_changed && !self.expanded && self.toast.is_none() && self.leaving.is_none() {
+                    self.trim_at = Some(n + Duration::from_secs(3));
+                }
+            }
             unsafe {
                 let _ = KillTimer(self.hwnd, TIMER_ANIM);
             }
         }
     }
 
+    /// Advance the hover spring. Returns true once hover is at rest (nothing pending).
+    fn step_hover(&mut self, n: Instant, dt: f32, key: ViewKey) -> bool {
+        let compact = matches!(key, ViewKey::Compact(_)) && self.leaving.is_none() && !self.hidden;
+        let raw = compact && (self.mouse.is_some() || self.drag_hover);
+        let mut pending = false;
+        if !compact {
+            self.hover_on = false;
+        } else if raw && !self.hover_on {
+            // dragging files onto the island reacts at once
+            let since = self.hover_in.map(|t| n.duration_since(t)).unwrap_or(HOVER_IN);
+            if self.drag_hover || since >= HOVER_IN {
+                self.hover_on = true;
+            } else {
+                pending = true;
+            }
+        } else if !raw && self.hover_on {
+            let since = self.hover_out.map(|t| n.duration_since(t)).unwrap_or(HOVER_OUT);
+            if since >= HOVER_OUT {
+                self.hover_on = false;
+            } else {
+                pending = true;
+            }
+        }
+        let t = if self.hover_on { 1.0 } else { 0.0 };
+        let w = if self.hover_on { HOVER_W_IN } else { HOVER_W_OUT };
+        let mut rem = dt;
+        while rem > 0.0 {
+            let s = rem.min(1.0 / 240.0);
+            let a = w * w * (t - self.hov) - 2.0 * w * self.hov_v;
+            self.hov_v += a * s;
+            self.hov += self.hov_v * s;
+            rem -= s;
+        }
+        let rest = (self.hov - t).abs() < 0.004 && self.hov_v.abs() < 0.05;
+        if rest {
+            self.hov = t;
+            self.hov_v = 0.0;
+        }
+        rest && !pending
+    }
+
     fn render(&mut self) {
         let s = self.gfx.scale;
-        let w = self.sw.x.max(1.0);
-        let h = self.sh.x.max(0.0);
+        let w = (self.sw.x + HOVER_W * self.hov).max(1.0);
+        let h = (self.sh.x + HOVER_H * self.hov).max(0.0);
         // extra room on both sides for the concave "shoulders" where the notch meets the screen edge
         let wpx = ((w + 2.0 * SHOULDER) * s).ceil() as i32 + 2;
         let hpx = (h * s).ceil() as i32 + 1;
@@ -1116,8 +1219,14 @@ impl App {
         }
         let c = R::new(full.x, full.y, full.w - seg, full.h);
         match live {
-            // idle: empty black notch, nothing drawn
-            Live::Idle => {}
+            // idle: an empty black notch; hovering fades in a small clock so it reads as clickable
+            Live::Idle => {
+                let a = smooth((self.hov - 0.25) / 0.75);
+                if a > 0.01 {
+                    let r = R::new(c.x, c.y + 1.0 - 2.0 * (1.0 - a), c.w, c.h);
+                    g.text(&hm(now().secs), r, 13.0, 600, WHITE.a(0.78 * a), Al::C);
+                }
+            }
             Live::Media => {
                 let Some(m) = &self.media else { return };
                 let acc = self.accent();
@@ -1202,17 +1311,25 @@ impl App {
             g.text(&t.title, R::new(tx, c.y, c.right() - tx - SHORT_PAD + 4.0, c.h), SHORT_SIZE, 600, WHITE, Al::L);
             return;
         }
-        let cx = c.x + 30.0;
-        g.circle(cx, c.cy(), 19.0, t.accent.a(0.18));
-        self.draw_ticon(g, &t.icon, R::new(cx - 19.0, c.cy() - 19.0, 38.0, 38.0), t.accent);
-        let tx = c.x + 60.0;
-        let tw = c.w - 76.0;
-        if t.sub.is_empty() {
-            g.text(&t.title, R::new(tx, c.y, tw, c.h), 14.0, 600, WHITE, Al::L);
-        } else {
-            g.text(&t.title, R::new(tx, c.y + 9.0, tw, 20.0), 14.0, 600, WHITE, Al::L);
-            g.text(&t.sub, R::new(tx, c.y + 29.0, tw, 18.0), 12.0, 400, T2, Al::L);
+        let rad = TWO_ICON / 2.0;
+        let cx = c.x + TWO_PAD + rad;
+        g.circle(cx, c.cy(), rad, t.accent.a(0.18));
+        let ir = R::new(cx - rad, c.cy() - rad, TWO_ICON, TWO_ICON);
+        match &t.icon {
+            TIcon::G(ch) => g.icon(*ch, ir, 14.0, t.accent),
+            TIcon::Txt(s) => g.text(s, ir, 12.5, 700, t.accent, Al::C),
+            TIcon::Battery(f, ch) => draw_battery(g, ir.cx() - 10.0, ir.cy(), 18.0, 10.0, *f, *ch),
+            TIcon::Drop => {
+                if let Some(geo) = g.drop_geo(R::new(ir.cx() - 5.5, ir.cy() - 7.5, 11.0, 15.0)) {
+                    g.fill_geo(&geo, t.accent);
+                }
+            }
         }
+        let tx = ir.right() + TWO_GAP;
+        let tw = c.right() - tx - TWO_PAD;
+        let mid = c.cy();
+        g.text(&t.title, R::new(tx, mid - 17.0, tw, 18.0), TWO_TITLE, 600, WHITE, Al::L);
+        g.text(&t.sub, R::new(tx, mid + 1.0, tw, 16.0), TWO_SUB, 400, T2, Al::L);
     }
 
     // -------------------------------------------------------------- expanded
@@ -2090,6 +2207,23 @@ impl App {
                 redraw = true;
             }
         }
+        // once the island is small again, hand buffers and idle pages back to Windows
+        let small = !self.expanded && self.toast.is_none() && self.leaving.is_none();
+        if !small {
+            self.trim_at = None;
+        } else if self.trim_at.is_none() && self.gfx.oversized(self.win.2, self.win.3) {
+            self.trim_at = Some(n + Duration::from_secs(3));
+        }
+        if let Some(at) = self.trim_at {
+            if small && !self.anim_on && n >= at {
+                self.trim_at = None;
+                if self.win.2 > 0 && self.win.3 > 0 {
+                    self.gfx.trim(self.win.2, self.win.3);
+                }
+                crate::util::trim_memory();
+                dbg_log("memory: trimmed");
+            }
+        }
         if self.pomo.active() && !self.pomo.paused && self.pomo.remaining() <= 0.0 {
             self.finish_phase(true);
             redraw = true;
@@ -2390,6 +2524,7 @@ impl App {
         let (cx, top, s) = monitor();
         self.mon_cx = cx;
         self.mon_top = top;
+        crate::vsync::display_changed();
         if (s - self.gfx.scale).abs() > 0.001 {
             self.gfx.set_scale(s);
         }
@@ -2406,6 +2541,9 @@ impl App {
 
     pub fn on_mouse_move(&mut self, lp: LPARAM) {
         let p = self.local(lp);
+        if self.mouse.is_none() {
+            self.hover_in = Some(Instant::now());
+        }
         if !self.tracking {
             self.tracking = true;
             let mut tme = TRACKMOUSEEVENT {
@@ -2444,6 +2582,7 @@ impl App {
     pub fn on_mouse_leave(&mut self) {
         self.tracking = false;
         self.mouse = None;
+        self.hover_out = Some(Instant::now());
         self.kick();
     }
 

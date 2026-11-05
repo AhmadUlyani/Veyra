@@ -214,6 +214,37 @@ impl Gfx {
         true
     }
 
+    /// True when the frame buffer is much larger than a w×h frame needs
+    /// (left over from the expanded island or a notice).
+    pub fn oversized(&self, w: i32, h: i32) -> bool {
+        (self.cap.0 as i64) * (self.cap.1 as i64) > (w.max(1) as i64) * (h.max(1) as i64) * 3 / 2
+    }
+
+    /// Give memory back once the island is small again: shrink the frame buffer to w×h and
+    /// recreate the clip layers (the software rasterizer keeps a backing bitmap per layer,
+    /// sized to the largest content it ever clipped).
+    pub fn trim(&mut self, w: i32, h: i32) {
+        if self.depth.get() != 0 || w <= 0 || h <= 0 {
+            return;
+        }
+        if self.oversized(w, h) {
+            // forces ensure_dib to allocate exactly w×h (it frees the old buffer itself)
+            let old = self.cap;
+            self.cap = (0, 0);
+            if !self.ensure_dib(w, h) {
+                self.cap = old;
+            }
+        }
+        let mut layers = Vec::with_capacity(self.layers.len());
+        for _ in 0..self.layers.len() {
+            match unsafe { self.rt.CreateLayer(None) } {
+                Ok(l) => layers.push(l),
+                Err(_) => return,
+            }
+        }
+        self.layers = layers;
+    }
+
     pub fn begin(&mut self, w: i32, h: i32) -> bool {
         if !self.ensure_dib(w, h) {
             return false;
