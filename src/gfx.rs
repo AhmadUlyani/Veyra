@@ -73,7 +73,12 @@ pub struct Gfx {
     /// the current UI colors (theme.conf)
     pub theme: crate::theme::Theme,
     layers: Vec<ID2D1Layer>,
+    /// layers in use (index of the next free one in `layers`)
     depth: Cell<usize>,
+    /// open clips, innermost last, so `pop` undoes the right kind
+    clips: RefCell<Vec<Clip>>,
+    /// a layer was used since the layers were last (re)created
+    layers_used: Cell<bool>,
     round: ID2D1StrokeStyle,
     dash: ID2D1StrokeStyle,
     fmts: RefCell<HashMap<FmtKey, IDWriteTextFormat>>,
@@ -157,6 +162,8 @@ impl Gfx {
                 theme: crate::theme::Theme::default(),
                 layers,
                 depth: Cell::new(0),
+                clips: RefCell::new(Vec::new()),
+                layers_used: Cell::new(false),
                 round,
                 dash,
                 fmts: RefCell::new(HashMap::new()),
@@ -201,12 +208,15 @@ impl Gfx {
         unsafe { self.rt.SetDpi(96.0 * s, 96.0 * s) };
     }
 
-    fn ensure_dib(&mut self, w: i32, h: i32) -> bool {
+    /// Makes the frame buffer at least w×h (`exact`: exactly w×h, used when trimming).
+    fn ensure_dib(&mut self, w: i32, h: i32, exact: bool) -> bool {
         if w <= self.cap.0 && h <= self.cap.1 && !self.dib.is_invalid() {
             return true;
         }
-        let nw = w.max(self.cap.0);
-        let nh = h.max(self.cap.1);
+        // grow in 64 px steps so an opening animation reallocates a few times, not every frame
+        let step = |v: i32| if exact { v } else { (v + 63) / 64 * 64 };
+        let nw = if w > self.cap.0 { step(w) } else { self.cap.0 };
+        let nh = if h > self.cap.1 { step(h) } else { self.cap.1 };
         unsafe {
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
@@ -245,16 +255,26 @@ impl Gfx {
     /// recreate the clip layers (the software rasterizer keeps a backing bitmap per layer,
     /// sized to the largest content it ever clipped).
     pub fn trim(&mut self, w: i32, h: i32) {
-        if self.depth.get() != 0 || w <= 0 || h <= 0 {
+        if !self.clips.borrow().is_empty() || w <= 0 || h <= 0 {
             return;
         }
         if self.oversized(w, h) {
             // forces ensure_dib to allocate exactly w×h (it frees the old buffer itself)
             let old = self.cap;
             self.cap = (0, 0);
-            if !self.ensure_dib(w, h) {
+            if !self.ensure_dib(w, h, true) {
                 self.cap = old;
             }
+        }
+        self.layers_used.set(true);
+        self.release_layers();
+    }
+
+    /// Recreates the clip layers (when any was used since last time), dropping the backing
+    /// bitmaps the software rasterizer keeps per layer, sized to the largest content it clipped.
+    pub fn release_layers(&mut self) {
+        if !self.layers_used.get() || !self.clips.borrow().is_empty() {
+            return;
         }
         let mut layers = Vec::with_capacity(self.layers.len());
         for _ in 0..self.layers.len() {
@@ -264,13 +284,18 @@ impl Gfx {
             }
         }
         self.layers = layers;
+        self.layers_used.set(false);
     }
 
     pub fn begin(&mut self, w: i32, h: i32) -> bool {
-        if !self.ensure_dib(w, h) {
+        if !self.ensure_dib(w, h, false) {
             return false;
         }
-        let rc = RECT { left: 0, top: 0, right: w, bottom: h };
+        // Bind the whole buffer, not just this frame's w×h: the render target reallocates
+        // its internals whenever the bound size changes, and doing that on every animation
+        // frame left memory behind on each open / close. The buffer only changes size when
+        // it grows (in steps) or is trimmed, and only its top-left w×h reaches the screen.
+        let rc = RECT { left: 0, top: 0, right: self.cap.0, bottom: self.cap.1 };
         unsafe {
             if self.rt.BindDC(self.memdc, &rc).is_err() {
                 return false;
@@ -280,12 +305,13 @@ impl Gfx {
             self.rt.Clear(Some(&C(0.0, 0.0, 0.0, 0.0).d2d()));
         }
         self.depth.set(0);
+        self.clips.borrow_mut().clear();
         true
     }
 
     pub fn end(&self, hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
         unsafe {
-            while self.depth.get() > 0 {
+            while !self.clips.borrow().is_empty() {
                 self.pop();
             }
             let _ = self.rt.EndDraw(None, None);
@@ -371,7 +397,7 @@ impl Gfx {
         }
         let th = &self.theme;
         let same = |u: &C| (u.0 - c.0).abs() < 0.002 && (u.1 - c.1).abs() < 0.002 && (u.2 - c.2).abs() < 0.002;
-        if [th.icon, th.icon_active, th.button_text].iter().flatten().any(same) {
+        if [th.icon, th.icon_active, th.button_text, th.button_accent_text, th.audio_bar, th.spectrum, th.lyrics_hover, th.timer, th.timer_break].iter().flatten().any(same) {
             return c;
         }
         let l = crate::theme::luma(std::iter::once(c));
@@ -523,11 +549,15 @@ impl Gfx {
             return None;
         }
         let o = if left { x - f } else { x + f };
+        // reach a pixel into the island so the two shapes overlap instead of meeting at a
+        // shared anti-aliased edge (which leaves a faint see-through seam)
+        let inner = if left { x + 1.0 } else { x - 1.0 };
         unsafe {
             let geo = self.factory.CreatePathGeometry().ok()?;
             let sink = geo.Open().ok()?;
             sink.BeginFigure(pt(o, y), D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddLine(pt(x, y));
+            sink.AddLine(pt(inner, y));
+            sink.AddLine(pt(inner, y + f));
             sink.AddLine(pt(x, y + f));
             sink.AddArc(&D2D1_ARC_SEGMENT {
                 point: pt(o, y),
@@ -678,13 +708,19 @@ impl Gfx {
         self.pop();
     }
 
+    /// Clips (and fades) what follows to `geo` until `pop`.
     pub fn push_geo(&self, geo: &ID2D1Geometry, opacity: f32) {
         let d = self.depth.get();
         if d >= self.layers.len() {
+            // out of layers: draw unclipped, but keep push/pop balanced
+            self.clips.borrow_mut().push(Clip::None);
             return;
         }
+        // Bound the layer to the shape: the software rasterizer gives every layer a backing
+        // bitmap the size of its content bounds (unbounded = the whole frame).
+        let b = unsafe { geo.GetBounds(None) }.unwrap_or(D2D_RECT_F { left: -1e5, top: -1e5, right: 1e5, bottom: 1e5 });
         let p = D2D1_LAYER_PARAMETERS {
-            contentBounds: D2D_RECT_F { left: -1e5, top: -1e5, right: 1e5, bottom: 1e5 },
+            contentBounds: D2D_RECT_F { left: b.left - 1.0, top: b.top - 1.0, right: b.right + 1.0, bottom: b.bottom + 1.0 },
             geometricMask: ManuallyDrop::new(Some(geo.clone())),
             maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
             maskTransform: Matrix3x2::identity(),
@@ -693,11 +729,20 @@ impl Gfx {
             layerOptions: D2D1_LAYER_OPTIONS_NONE,
         };
         unsafe { self.rt.PushLayer(&p, &self.layers[d]) };
+        self.layers_used.set(true);
         let _ = ManuallyDrop::into_inner(p.geometricMask);
         self.depth.set(d + 1);
+        self.clips.borrow_mut().push(Clip::Layer);
     }
 
+    /// Clips to a (rounded) rectangle at `opacity` until `pop`. A plain, opaque rectangle uses a
+    /// cheap axis-aligned clip, which needs no layer bitmap at all.
     pub fn push_rr(&self, r: R, rad: f32, opacity: f32) {
+        if rad <= 0.0 && opacity >= 0.999 {
+            unsafe { self.rt.PushAxisAlignedClip(&r.d2d(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+            self.clips.borrow_mut().push(Clip::Axis);
+            return;
+        }
         unsafe {
             if let Ok(g) = self.factory.CreateRoundedRectangleGeometry(&rr(r, rad)) {
                 if let Ok(g) = g.cast::<ID2D1Geometry>() {
@@ -707,16 +752,27 @@ impl Gfx {
             }
         }
         // keep push/pop balanced even on failure
-        self.depth.set(self.depth.get());
+        self.clips.borrow_mut().push(Clip::None);
     }
 
     pub fn pop(&self) {
-        let d = self.depth.get();
-        if d > 0 {
-            unsafe { self.rt.PopLayer() };
-            self.depth.set(d - 1);
+        let c = self.clips.borrow_mut().pop();
+        match c {
+            Some(Clip::Layer) => {
+                unsafe { self.rt.PopLayer() };
+                self.depth.set(self.depth.get().saturating_sub(1));
+            }
+            Some(Clip::Axis) => unsafe { self.rt.PopAxisAlignedClip() },
+            Some(Clip::None) | None => {}
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Clip {
+    Layer,
+    Axis,
+    None,
 }
 
 impl Drop for Gfx {

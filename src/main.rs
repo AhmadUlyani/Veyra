@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod clip;
 mod events;
 mod gfx;
 mod install;
@@ -9,6 +10,7 @@ mod lyrics;
 mod media;
 mod player;
 mod shelf;
+mod shots;
 mod sound;
 mod store;
 mod system;
@@ -152,8 +154,8 @@ fn run_deferred(hwnd: HWND, d: Deferred) {
     match d {
         Deferred::DragOut(paths) => shelf::drag_out(hwnd, &paths),
         Deferred::Menu => {
-            let (auto, hidden) = with_app(|a| (a.autostart, a.user_hidden)).unwrap_or((false, false));
-            let cmd = tray::menu(hwnd, auto, hidden);
+            let Some(st) = with_app(|a| a.menu_state()) else { return };
+            let cmd = tray::menu(hwnd, &st);
             if cmd == tray::CMD_QUIT {
                 // plays the closing animation, then closes the window
                 with_app(|a| a.begin_quit());
@@ -207,6 +209,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 Some(LRESULT(0))
             }
+            WM_CLIPBOARDUPDATE => {
+                app.on_clipboard();
+                Some(LRESULT(0))
+            }
             WM_MOUSEMOVE => {
                 app.on_mouse_move(lp);
                 Some(LRESULT(0))
@@ -256,6 +262,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_DESTROY => {
                 app::dbg_log("quit: WM_DESTROY");
+                clip::stop(hwnd);
                 app.save_now();
                 app::dbg_log("quit: saved");
                 Some(LRESULT(0))

@@ -50,6 +50,22 @@ impl Default for Focus {
     }
 }
 
+/// Switches from the tray menu.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct Settings {
+    /// shrink to a thin line at the top of the screen unless the mouse is on it
+    pub line_mode: bool,
+    /// put new screenshots on the Shelf
+    pub screenshots: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings { line_mode: false, screenshots: true }
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Data {
@@ -58,6 +74,7 @@ pub struct Data {
     pub tasks: Vec<Task>,
     pub shelf: Vec<String>,
     pub next_id: u64,
+    pub settings: Settings,
 }
 
 fn path() -> Option<PathBuf> {

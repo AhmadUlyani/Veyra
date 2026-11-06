@@ -34,6 +34,17 @@ pub struct Theme {
     pub icon: Option<C>,
     /// Icons of the open tab / switched-on toggles (None = each feature's color).
     pub icon_active: Option<C>,
+    /// Text and icons on the main filled buttons (None = black or white, whichever reads better).
+    pub button_accent_text: Option<C>,
+    /// Song progress bars and the volume bar (None = the album-art color).
+    pub audio_bar: Option<C>,
+    /// The moving bars next to the song in the closed island (None = the album-art color).
+    pub spectrum: Option<C>,
+    /// A lyric line under the mouse (None = the album-art color).
+    pub lyrics_hover: Option<C>,
+    /// The focus timer while focusing / during a break (None = orange / green).
+    pub timer: Option<C>,
+    pub timer_break: Option<C>,
 }
 
 impl Default for Theme {
@@ -52,6 +63,12 @@ impl Default for Theme {
             button_accent: None,
             icon: None,
             icon_active: None,
+            button_accent_text: None,
+            audio_bar: None,
+            spectrum: None,
+            lyrics_hover: None,
+            timer: None,
+            timer_break: None,
         }
     }
 }
@@ -121,6 +138,10 @@ button_active = auto
 # auto = keep each feature's own color
 button_accent = auto
 
+# Text and icons on those main colored buttons
+# auto = black or white, whichever reads better on the button
+button_accent_text = auto
+
 # --- Icons ------------------------------------------------------
 # Icon colors, set apart from the text.
 # icon        = regular icons (tabs, play / next, + and -, undo, ...)
@@ -129,6 +150,23 @@ button_accent = auto
 #               auto = each feature's own color
 icon = auto
 icon_active = auto
+
+# --- Music ------------------------------------------------------
+# auto = the color taken from the album art (changes with each song)
+# audio_bar    = song progress bars and the volume bar
+# spectrum     = the moving bars next to the song in the closed island
+# lyrics_hover = a lyric line under the mouse
+audio_bar = auto
+spectrum = auto
+lyrics_hover = auto
+
+# --- Focus timer ------------------------------------------------
+# auto = orange while focusing, green during a break
+# timer       = ring, time and label while focusing (also the closed
+#               island's timer, its notices and the Focus tab icon)
+# timer_break = the same during a break
+timer = auto
+timer_break = auto
 ";
 
 /// Options added after the first release: (where the block starts in `DEFAULT_FILE`, what
@@ -137,7 +175,10 @@ const ADDED: &[(&str, &str)] = &[
     ("# --- Background while open", "\n# --- Text"),
     ("# Text while open", "\n# --- Buttons"),
     ("# Selected button", "\n# Main colored"),
-    ("# --- Icons", ""),
+    ("# Text and icons on those main", "\n# --- Icons"),
+    ("# --- Icons", "\n# --- Music"),
+    ("# --- Music", "\n# --- Focus timer"),
+    ("# --- Focus timer", ""),
 ];
 
 /// The `ADDED` blocks with every option `cur` already sets left out (so an appended default
@@ -261,6 +302,12 @@ pub fn parse(s: &str) -> Theme {
         button_accent: opt_color(get("button_accent")),
         icon: opt_color(get("icon")),
         icon_active: opt_color(get("icon_active")),
+        button_accent_text: opt_color(get("button_accent_text")),
+        audio_bar: opt_color(get("audio_bar")),
+        spectrum: opt_color(get("spectrum")),
+        lyrics_hover: opt_color(get("lyrics_hover")),
+        timer: opt_color(get("timer")),
+        timer_break: opt_color(get("timer_break")),
     }
 }
 
@@ -483,6 +530,29 @@ mod tests {
         let sec = missing_blocks(cur);
         assert!(sec.contains("icon = auto") && !pairs(&sec).iter().any(|(k, _)| k == "icon_active"));
         assert_eq!(parse(&format!("{cur}\n{sec}")).icon_active, color("#FF8800"));
+    }
+
+    #[test]
+    fn music_and_accent_text() {
+        let t = parse("audio_bar = #FF0000\nspectrum = auto\nlyrics_hover = #00FF00\nbutton_accent_text = #FFFFFF");
+        assert_eq!(t.audio_bar, color("#FF0000"));
+        assert_eq!(t.spectrum, None);
+        assert_eq!(t.lyrics_hover, color("#00FF00"));
+        assert_eq!(t.button_accent_text, color("#FFFFFF"));
+        let keys: Vec<String> = pairs(&missing_blocks("icon = auto\nicon_active = auto")).into_iter().map(|(k, _)| k).collect();
+        for k in ["audio_bar", "spectrum", "lyrics_hover", "button_accent_text"] {
+            assert!(keys.contains(&k.to_string()), "{k}");
+        }
+        assert!(!keys.contains(&"icon".to_string()));
+    }
+
+    #[test]
+    fn timer_colors() {
+        let t = parse("timer = #00AAFF");
+        assert_eq!(t.timer, color("#00AAFF"));
+        assert_eq!(t.timer_break, None);
+        let keys: Vec<String> = pairs(&missing_blocks("lyrics_hover = auto")).into_iter().map(|(k, _)| k).collect();
+        assert!(keys.contains(&"timer".to_string()) && keys.contains(&"timer_break".to_string()));
     }
 
     #[test]

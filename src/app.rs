@@ -18,7 +18,7 @@ use crate::lyrics::{self, Line};
 use crate::media::{MediaCmd, MediaState};
 use crate::store::{self, Data, Task};
 use crate::util::*;
-use crate::{shelf, sound, system, theme, tray};
+use crate::{clip, shelf, shots, sound, system, theme, tray};
 
 // ------------------------------------------------------------------ style
 
@@ -36,6 +36,7 @@ const SHELF_C: C = C::hex(0xB18CFF);
 const RED: C = C::hex(0xFF5C5C);
 const GREEN: C = C::hex(0x4CD787);
 const MEDIA_C: C = C::hex(0xF2F2F7);
+const CLIP_C: C = C::hex(0x5AC8FA);
 
 // shelf tiles (DIP); the shelf page is 500 wide with 18 px padding on each side
 const SHELF_TW: f32 = 80.0;
@@ -76,6 +77,7 @@ mod ic {
     pub const MINUS: char = '\u{E738}';
     pub const DOC: char = '\u{E7C3}';
     pub const CHECK: char = '\u{E73E}';
+    pub const CLIP: char = '\u{E77F}';
 }
 
 // ------------------------------------------------------------------ types
@@ -87,12 +89,15 @@ pub enum Tab {
     Water,
     Shelf,
     Tasks,
+    Clipboard,
 }
-const TABS: [Tab; 5] = [Tab::Media, Tab::Focus, Tab::Water, Tab::Shelf, Tab::Tasks];
+const TABS: [Tab; 6] = [Tab::Media, Tab::Focus, Tab::Water, Tab::Shelf, Tab::Tasks, Tab::Clipboard];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ViewKey {
     Compact(Live),
+    /// line mode: just a thin line at the top edge until the mouse comes
+    Line,
     Toast(u64),
     Expanded(Tab, bool),
 }
@@ -136,11 +141,22 @@ const IDLE_W: f32 = 110.0;
 // passing by (on its way to a browser tab) from waking it, and stop flicker at the edge
 const HOVER_W: f32 = 16.0;
 const HOVER_H: f32 = 4.0;
-const HOVER_IN: Duration = Duration::from_millis(60);
+const HOVER_IN: Duration = Duration::from_millis(50);
 const HOVER_OUT: Duration = Duration::from_millis(120);
 /// critically damped (no overshoot): settles in ~180 ms growing, ~250 ms shrinking
 const HOVER_W_IN: f32 = 26.0;
 const HOVER_W_OUT: f32 = 18.0;
+// line mode: the thin line the closed island shrinks to, and how long it stays open after
+// the mouse leaves
+const LINE_W: f32 = 96.0;
+const LINE_H: f32 = 5.0;
+const LINE_OUT: Duration = Duration::from_millis(200);
+/// line <-> pill spring: critically damped, within 1 px of its target after about 250 ms
+const LINE_SPRING_W: f32 = 19.0;
+/// the open panel closes this long after the mouse left it
+const PANEL_OUT: Duration = Duration::from_millis(300);
+/// how far beside the line (each side) the mouse still opens it: about 1 cm (96 px = 1 inch)
+const LINE_HIT_PAD: f32 = 38.0;
 // one-line toasts (Caps Lock)
 const SHORT_H: f32 = 34.0;
 const SHORT_PAD: f32 = 12.0;
@@ -194,6 +210,9 @@ enum Act {
     TaskAdd,
     TaskToggle(u64),
     TaskDel(u64),
+    ClipCopy(usize),
+    ClipDel(usize),
+    ClipClear,
     Toast,
     VolBar(R),
 }
@@ -274,7 +293,13 @@ impl Spring {
     }
     fn step(&mut self, dt: f32) {
         let k: f32 = 300.0;
-        let c = 2.0 * k.sqrt() * 0.74;
+        self.step_with(dt, k, 2.0 * k.sqrt() * 0.74);
+    }
+    /// Critically damped at angular speed `w`: quick and without any bounce.
+    fn step_fast(&mut self, dt: f32, w: f32) {
+        self.step_with(dt, w * w, 2.0 * w);
+    }
+    fn step_with(&mut self, dt: f32, k: f32, c: f32) {
         let a = -k * (self.x - self.t) - c * self.v;
         self.v += a * dt;
         self.x += self.v * dt;
@@ -338,6 +363,13 @@ pub struct App {
     sr: Spring,
     view: ViewKey,
     view_age: f32,
+    /// content size for `view`, worked out together with it (see draw)
+    view_wh: Option<(f32, f32)>,
+    /// the line came from the closed pill (its content fades out as it shrinks); from the open
+    /// island or a notice it shrinks empty
+    line_from_pill: bool,
+    /// right after closing in line mode: do not treat the cursor as hovering (see tick)
+    no_hover_until: Option<Instant>,
     expanded: bool,
     tab: Tab,
     lyrics_open: bool,
@@ -370,12 +402,27 @@ pub struct App {
     surrogate: Option<u16>,
     task_due: Option<i64>,
     task_scroll: usize,
+    /// clipboard history, newest first (memory only)
+    clips: Vec<clip::Item>,
+    clip_scroll: usize,
+    /// which history entry was copied back from the list, and when (for the "Copied" mark)
+    clip_copied: Option<(Instant, String)>,
+    /// text Veyra itself just put on the clipboard: its echo must not reorder the history
+    clip_ignore: Option<String>,
+    /// the clipboard changed: read it at this time (see on_clipboard)
+    clip_due: Option<Instant>,
+    /// new screenshots -> Shelf
+    shots: shots::Watcher,
+    shots_next: Instant,
     shelf_scroll: usize,
     /// animated shelf position (in tiles), slides toward `shelf_scroll`
     shelf_x: f32,
     drag_hover: bool,
     drag_expanded: bool,
     collapse_at: Option<Instant>,
+    /// the mouse has been over the panel since it opened (a panel opened from the tray, with
+    /// the cursor far away, must not close by itself right away)
+    panel_entered: bool,
     hidden: bool,
     anim_on: bool,
     last_frame: Instant,
@@ -394,6 +441,8 @@ pub struct App {
     pub user_hidden: bool,
     edit: Option<Edit>,
     demo_switch: Option<Instant>,
+    /// testing aid (VEYRA_DEMO=stress): next step and how many were done
+    demo_stress: Option<(Instant, u32)>,
     pub deferred: Option<Deferred>,
     pub autostart: bool,
     /// closing animation in progress: what to do at the end, when it started, target width
@@ -466,6 +515,9 @@ impl App {
             sr: Spring::new(10.0),
             view: ViewKey::Compact(Live::Idle),
             view_age: 0.0,
+            view_wh: None,
+            line_from_pill: false,
+            no_hover_until: None,
             expanded: false,
             tab: Tab::Media,
             lyrics_open: false,
@@ -498,11 +550,19 @@ impl App {
             surrogate: None,
             task_due: None,
             task_scroll: 0,
+            clips: Vec::new(),
+            clip_scroll: 0,
+            clip_copied: None,
+            clip_ignore: None,
+            clip_due: None,
+            shots: shots::Watcher::new(),
+            shots_next: Instant::now(),
             shelf_scroll: 0,
             shelf_x: 0.0,
             drag_hover: false,
             drag_expanded: false,
             collapse_at: None,
+            panel_entered: false,
             hidden: false,
             anim_on: false,
             last_frame: n,
@@ -519,6 +579,7 @@ impl App {
             user_hidden: false,
             edit: None,
             demo_switch: None,
+            demo_stress: None,
             deferred: None,
             autostart: tray::autostart_enabled(),
             leaving: None,
@@ -533,6 +594,7 @@ impl App {
             theme_mtime: theme::modified(),
             open_k: 0.0,
         };
+        clip::listen(hwnd);
         Ok(app)
     }
 
@@ -601,7 +663,7 @@ impl App {
         }
     }
 
-    /// Screenshot/testing aid: VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|toast|volume|caps|capsoff
+    /// Screenshot/testing aid: VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|toast|volume|caps|capsoff|stress
     fn demo_view(&mut self, v: &str) {
         self.demo = true;
         match v {
@@ -631,6 +693,13 @@ impl App {
                 }
                 self.expand(Some(Tab::Shelf));
             }
+            // leak check: keeps re-fetching lyrics and opening / closing the island
+            "stress" => {
+                self.lyrics_open = true;
+                self.expand(Some(Tab::Media));
+                self.ensure_lyrics();
+                self.demo_stress = Some((Instant::now() + Duration::from_millis(1500), 0));
+            }
             "slide" => {
                 self.expand(Some(Tab::Media));
                 self.demo_switch = Some(Instant::now() + Duration::from_millis(1500));
@@ -645,6 +714,22 @@ impl App {
                 self.input = "Review pull request".into();
                 self.input_focus = true;
                 self.adjust_due(0);
+                self.expand(Some(Tab::Tasks));
+            }
+            "clipboard" => {
+                let n = now().secs;
+                let samples = ["Veyra", "Meeting moved to 3 pm,\nsame room", "https://lrclib.net/docs", "git commit -m \"fix: seam on light themes\""];
+                for (i, t) in samples.iter().enumerate() {
+                    clip::push(&mut self.clips, t.to_string(), n - 420 * (3 - i as i64));
+                }
+                self.expand(Some(Tab::Clipboard));
+            }
+            "line" => {
+                self.data.settings.line_mode = true;
+            }
+            "clipboardempty" => self.expand(Some(Tab::Clipboard)),
+            "tasksempty" => {
+                self.data.tasks.clear();
                 self.expand(Some(Tab::Tasks));
             }
             "toast" => self.toast(TIcon::Drop, "Time to drink some water", "750 / 2000 ml today · tap to log", 600.0, WATER_C, Some(Tab::Water)),
@@ -774,12 +859,21 @@ impl App {
         }
     }
 
+    /// The timer's color: theme.conf `timer` / `timer_break`, else orange / green.
     fn pomo_color(&self) -> C {
         if self.pomo.mode == PMode::Break {
-            BREAK_C
+            self.break_color()
         } else {
-            FOCUS_C
+            self.focus_color()
         }
+    }
+
+    fn focus_color(&self) -> C {
+        self.gfx.theme.timer.unwrap_or(FOCUS_C)
+    }
+
+    fn break_color(&self) -> C {
+        self.gfx.theme.timer_break.unwrap_or(BREAK_C)
     }
 
     // -------------------------------------------------------------- toasts
@@ -842,6 +936,9 @@ impl App {
             self.tab
         });
         self.tab = t;
+        if !self.expanded {
+            self.panel_entered = self.cursor_inside();
+        }
         self.expanded = true;
         self.toast = None;
         self.collapse_at = None;
@@ -862,6 +959,15 @@ impl App {
         self.drag_expanded = false;
         self.collapse_at = None;
         self.press = None;
+        if self.data.settings.line_mode {
+            // The cursor was over the open panel (Esc) or just clicked outside it: that is not a
+            // hover on the line, so close straight to the line. A cursor really resting on the
+            // line still opens it with its next movement.
+            self.mouse = None;
+            self.tracking = false;
+            self.hover_on = false;
+            self.no_hover_until = Some(Instant::now() + Duration::from_millis(350));
+        }
         self.kick();
     }
 
@@ -881,6 +987,7 @@ impl App {
                 Tab::Water => (500.0, 214.0),
                 Tab::Shelf => (500.0, 196.0),
                 Tab::Tasks => (500.0, 250.0),
+                Tab::Clipboard => (500.0, 250.0),
             };
             return (w, h, 30.0, ViewKey::Expanded(self.tab, lyr));
         }
@@ -898,6 +1005,9 @@ impl App {
                 let w = (TWO_PAD + TWO_ICON + TWO_GAP + text + TWO_PAD + 8.0).clamp(150.0, TWO_MAX_W);
                 return (w, TWO_H, 20.0, ViewKey::Toast(t.id));
             }
+        }
+        if self.data.settings.line_mode && !self.hover_on && !self.drag_hover && !self.hidden {
+            return (LINE_W, LINE_H, LINE_H / 2.0, ViewKey::Line);
         }
         let (live, sec) = self.lives();
         // hover growth is added on top in render(), driven by its own spring
@@ -969,6 +1079,7 @@ impl App {
         self.anim_stat.1 += 1;
         let (tw, th, tr, key) = self.target();
         let hover_still = self.step_hover(n, dt, key);
+        self.view_wh = Some((tw, th));
         if key != self.view {
             self.anim_view_change = true;
             match (self.view, key) {
@@ -989,6 +1100,9 @@ impl App {
                     self.view_age = 0.0;
                 }
             }
+            if key == ViewKey::Line {
+                self.line_from_pill = matches!(self.view, ViewKey::Compact(_));
+            }
             self.view = key;
         }
         if let Some(sl) = &mut self.slide {
@@ -1000,12 +1114,26 @@ impl App {
         self.sw.t = tw;
         self.sh.t = th;
         self.sr.t = tr;
+        // line mode, between the line and the pill (not a panel or notice closing to the line)
+        let line_pill = self.data.settings.line_mode
+            && self.leaving.is_none()
+            && match self.view {
+                ViewKey::Line => self.line_from_pill,
+                ViewKey::Compact(_) => true,
+                _ => false,
+            };
         let mut rem = dt;
         while rem > 0.0 {
             let s = rem.min(1.0 / 240.0);
-            self.sw.step(s);
-            self.sh.step(s);
-            self.sr.step(s);
+            if line_pill {
+                self.sw.step_fast(s, LINE_SPRING_W);
+                self.sh.step_fast(s, LINE_SPRING_W);
+                self.sr.step_fast(s, LINE_SPRING_W);
+            } else {
+                self.sw.step(s);
+                self.sh.step(s);
+                self.sr.step(s);
+            }
             rem -= s;
         }
         self.view_age += dt;
@@ -1066,6 +1194,8 @@ impl App {
             self.sw.snap();
             self.sh.snap();
             self.sr.snap();
+            // the animation's layer bitmaps are not needed while resting: let them go now
+            self.gfx.release_layers();
             self.anim_on = false;
             crate::vsync::run(false);
             let (t0, frames) = self.anim_stat;
@@ -1088,9 +1218,14 @@ impl App {
 
     /// Advance the hover spring. Returns true once hover is at rest (nothing pending).
     fn step_hover(&mut self, n: Instant, dt: f32, key: ViewKey) -> bool {
-        let compact = matches!(key, ViewKey::Compact(_)) && self.leaving.is_none() && !self.hidden;
-        let raw = compact && (self.mouse.is_some() || self.drag_hover);
-        let mut pending = false;
+        let compact = matches!(key, ViewKey::Compact(_) | ViewKey::Line) && self.leaving.is_none() && !self.hidden;
+        // in line mode, stay open a little longer once the mouse leaves, so it does not flicker
+        let out_delay = if self.data.settings.line_mode { LINE_OUT } else { HOVER_OUT };
+        // just closed in line mode: the panel is still shrinking under the cursor, no hover yet
+        let settling = self.no_hover_until.map(|t| n < t).unwrap_or(false);
+        let raw = compact && !settling && (self.mouse.is_some() || self.drag_hover);
+        // a cursor waiting out the settling time: keep frames coming so it is noticed afterwards
+        let mut pending = compact && settling && self.mouse.is_some();
         if !compact {
             self.hover_on = false;
         } else if raw && !self.hover_on {
@@ -1102,15 +1237,21 @@ impl App {
                 pending = true;
             }
         } else if !raw && self.hover_on {
-            let since = self.hover_out.map(|t| n.duration_since(t)).unwrap_or(HOVER_OUT);
-            if since >= HOVER_OUT {
+            let since = self.hover_out.map(|t| n.duration_since(t)).unwrap_or(out_delay);
+            if since >= out_delay {
                 self.hover_on = false;
             } else {
                 pending = true;
             }
         }
         let t = if self.hover_on { 1.0 } else { 0.0 };
-        let w = if self.hover_on { HOVER_W_IN } else { HOVER_W_OUT };
+        let w = if self.data.settings.line_mode {
+            LINE_SPRING_W
+        } else if self.hover_on {
+            HOVER_W_IN
+        } else {
+            HOVER_W_OUT
+        };
         let mut rem = dt;
         while rem > 0.0 {
             let s = rem.min(1.0 / 240.0);
@@ -1133,14 +1274,34 @@ impl App {
         let h = (self.sh.x + HOVER_H * self.hov).max(0.0);
         // extra room on both sides for the concave "shoulders" where the notch meets the screen edge
         let wpx = ((w + 2.0 * SHOULDER) * s).ceil() as i32 + 2;
+        // Line mode: an invisible strip at the very top, the line plus about 1 cm each side,
+        // catches the mouse. It stays while the pill is open too: a cursor beside a narrow pill
+        // that opened it is still "on" Veyra, so the pill does not close under it, bring the
+        // line (and its strip) back under the cursor and open again, over and over.
+        let strip = self.data.settings.line_mode
+            && matches!(self.view, ViewKey::Line | ViewKey::Compact(_))
+            && self.leaving.is_none()
+            && !self.hidden;
+        let strip_w = LINE_W + 2.0 * LINE_HIT_PAD;
+        let wpx = if strip { wpx.max((strip_w * s).ceil() as i32 + 2) } else { wpx };
         let hpx = (h * s).ceil() as i32 + 1;
         let left = self.mon_cx - wpx / 2;
         let top = self.mon_top;
         if !self.gfx.begin(wpx, hpx) {
             return;
         }
-        let island = R::new((wpx as f32 / s - w) / 2.0, 0.0, w, h);
+        // Whole pixels for the island's left and right edges: a side falling between pixels
+        // is drawn half transparent, which shows as a dark line on light island colors.
+        let wi = ((w * s).round() as i32).clamp(1, wpx);
+        let xi = (wpx - wi) / 2;
+        let island = R::new(xi as f32 / s, 0.0, wi as f32 / s, h);
         let mut ui = Ui { hits: Vec::with_capacity(32), mouse: self.mouse };
+        if strip {
+            // alpha 1/255: invisible, but the window still receives the mouse there
+            let sh = (LINE_H + 1.0).min(hpx as f32 / s);
+            let sx = (wpx as f32 / s - strip_w) / 2.0;
+            self.gfx.rect(R::new(sx, 0.0, strip_w, sh), C(0.0, 0.0, 0.0, 1.0 / 255.0));
+        }
         self.draw(&self.gfx, &mut ui, island);
         self.gfx.end(self.hwnd, left, top, wpx, hpx);
         self.win = (left, top, wpx, hpx);
@@ -1166,7 +1327,31 @@ impl App {
         let f = SHOULDER.min(isl.h * 0.5);
         g.shoulder_bg(isl.x, isl.y, f, true, top, bottom);
         g.shoulder_bg(isl.right(), isl.y, f, false, top, bottom);
-        let mut alpha = smooth((self.view_age - 0.05) / 0.22);
+        // Line mode: the pill grows out of (and shrinks back into) a 5 px line. Show its content
+        // only while the shape is nearly full height, so no half-clipped text flashes inside a
+        // shape that is still growing or already shrinking; when it goes back to a line the
+        // content fades out with the shape instead of vanishing at once.
+        let line_k = if self.data.settings.line_mode && matches!(self.view, ViewKey::Compact(_) | ViewKey::Line) {
+            smooth((isl.h - PILL_H * 0.75) / (PILL_H * 0.25))
+        } else {
+            1.0
+        };
+        let mut alpha = if self.view == ViewKey::Line {
+            // only a pill fades its content into the line; the open island or a notice closing
+            // straight to the line must not flash the pill's content on the way
+            if self.line_from_pill {
+                line_k
+            } else {
+                0.0
+            }
+        } else {
+            let fade = if self.data.settings.line_mode && matches!(self.view, ViewKey::Compact(_)) {
+                smooth(self.view_age / 0.2)
+            } else {
+                smooth((self.view_age - 0.05) / 0.22)
+            };
+            fade * line_k
+        };
         if let Some((_, since, _)) = self.leaving {
             // content goes first, then the black shape follows it into the edge
             alpha *= 1.0 - smooth(since.elapsed().as_secs_f32() / 0.12);
@@ -1174,11 +1359,40 @@ impl App {
         if alpha <= 0.01 {
             return;
         }
-        let (tw, th, _, _) = self.target();
-        let c = R::new(isl.cx() - tw / 2.0, isl.y, tw, th);
-        g.push_rr(shape, rad, alpha);
+        // The size that came with `view`. Asking target() again here could answer for a newer
+        // view: when the hover ends mid-frame it already says "line" while `view` is still the
+        // pill, and the pill's content would be squeezed into a 5 px box for one frame (text
+        // jumping up and cut off just before the island closes).
+        let (tw, th) = self.view_wh.unwrap_or_else(|| {
+            let (w, h, _, _) = self.target();
+            (w, h)
+        });
+        let c = if self.view == ViewKey::Line {
+            // still shrinking from the pill: lay its fading content out at the pill's size
+            let (live, sec) = self.lives();
+            let cw = self.compact_width(live) + self.segment_width(sec);
+            R::new(isl.cx() - cw / 2.0, isl.y, cw, PILL_H)
+        } else {
+            R::new(isl.cx() - tw / 2.0, isl.y, tw, th)
+        };
+        // Open and at rest, the content sits inside the shape clear of its rounded corners, so a
+        // plain rectangle clip will do: no island-sized layer bitmap (about 2 MB with lyrics).
+        // While anything moves or fades, clip to the real shape.
+        let at_rest = matches!(self.view, ViewKey::Expanded(..))
+            && alpha >= 0.999
+            && self.slide.is_none()
+            && self.leaving.is_none()
+            && self.sw.done()
+            && self.sh.done()
+            && self.sr.done();
+        if at_rest {
+            g.push_rr(shape, 0.0, 1.0);
+        } else {
+            g.push_rr(shape, rad, alpha);
+        }
         match self.view {
             ViewKey::Compact(live) => self.draw_compact(g, ui, c, live),
+            ViewKey::Line => self.draw_compact(g, ui, c, self.lives().0),
             ViewKey::Toast(_) => {
                 if let Some(t) = &self.toast {
                     self.draw_toast(g, ui, c, t);
@@ -1269,26 +1483,20 @@ impl App {
         }
         let c = R::new(full.x, full.y, full.w - seg, full.h);
         match live {
-            // idle: an empty black notch; hovering fades in a small clock so it reads as clickable
-            Live::Idle => {
-                let a = smooth((self.hov - 0.25) / 0.75);
-                if a > 0.01 {
-                    let r = R::new(c.x, c.y + 1.0 - 2.0 * (1.0 - a), c.w, c.h);
-                    g.text(&hm(now().secs), r, 13.0, 600, WHITE.a(0.78 * a), Al::C);
-                }
-            }
+            // idle: an empty notch, also while hovered (it only grows a little)
+            Live::Idle => {}
             Live::Media => {
                 let Some(m) = &self.media else { return };
                 let acc = self.accent();
                 let s = c.h - 10.0;
                 self.draw_art(g, R::new(c.x + 7.0, c.y + 5.0, s, s), 6.0);
                 let eq_x = c.right() - 14.0 - 18.0;
-                self.draw_eq(g, eq_x, c.cy(), m.playing, acc);
+                self.draw_eq(g, eq_x, c.cy(), m.playing, g.theme.spectrum.unwrap_or(acc));
                 // clock in the middle, between the artwork and the equalizer
                 let area = R::new(c.x + 7.0 + s + 6.0, c.y, (eq_x - 6.0) - (c.x + 7.0 + s + 6.0), c.h);
                 g.text(&hm(now().secs), area, CLOCK_SIZE, 700, WHITE, Al::C);
                 if m.dur > 0.0 {
-                    self.bottom_progress(g, full, (self.media_pos() / m.dur) as f32, acc.a(0.85));
+                    self.bottom_progress(g, full, (self.media_pos() / m.dur) as f32, g.theme.audio_bar.unwrap_or(acc).a(0.85));
                 }
             }
             Live::Pomo => {
@@ -1343,7 +1551,9 @@ impl App {
             );
             let bar = R::new(c.x + 46.0, c.cy() - 3.0, c.w - 46.0 - 58.0, 6.0);
             g.rrect(bar, 3.0, WHITE.a(0.16));
-            g.rrect(R::new(bar.x, bar.y, (bar.w * lv.clamp(0.0, 1.0)).max(6.0), bar.h), 3.0, t.accent);
+            // the volume bar follows theme.conf `audio_bar` (brightness keeps its own color)
+            let bar_c = if t.kind == K_VOL { g.theme.audio_bar.unwrap_or(t.accent) } else { t.accent };
+            g.rrect(R::new(bar.x, bar.y, (bar.w * lv.clamp(0.0, 1.0)).max(6.0), bar.h), 3.0, bar_c);
             g.text(&format!("{}%", (lv * 100.0).round() as i32), R::new(c.right() - 54.0, c.y, 40.0, c.h), 13.0, 600, WHITE, Al::R);
             if t.kind == K_VOL {
                 ui.hit(R::new(bar.x - 6.0, c.y, bar.w + 12.0, c.h), Act::VolBar(bar));
@@ -1396,7 +1606,7 @@ impl App {
             } else if hv {
                 g.rrect(b, 10.0, surf(g, true));
             }
-            let col = if active { active_icon(g, tab_color(*t)) } else if hv { WHITE } else { T3 };
+            let col = if active { active_icon(g, tab_color(g, *t)) } else if hv { WHITE } else { T3 };
             draw_tab_icon(g, *t, b, col);
         }
         // right: battery, date, clock
@@ -1448,6 +1658,7 @@ impl App {
             Tab::Water => self.draw_water(g, ui, body),
             Tab::Shelf => self.draw_shelf(g, ui, body),
             Tab::Tasks => self.draw_tasks(g, ui, body),
+            Tab::Clipboard => self.draw_clipboard(g, ui, body),
         }
     }
 
@@ -1504,7 +1715,8 @@ impl App {
         g.rrect(bar, bar.h / 2.0, WHITE.a(0.15));
         let f = if m.dur > 0.0 { (pos / m.dur) as f32 } else { 0.0 };
         if f > 0.0 {
-            g.rrect(R::new(bar.x, bar.y, (bar.w * f).max(bar.h), bar.h), bar.h / 2.0, if hv { acc } else { acc.a(0.9) });
+            let bc = g.theme.audio_bar.unwrap_or(acc);
+            g.rrect(R::new(bar.x, bar.y, (bar.w * f).max(bar.h), bar.h), bar.h / 2.0, if hv { bc } else { bc.a(0.9) });
         }
         if hv {
             // dot marking how far the song is
@@ -1567,7 +1779,7 @@ impl App {
                     let col = if is_cur {
                         WHITE
                     } else if hv {
-                        acc.a(0.9)
+                        g.theme.lyrics_hover.unwrap_or(acc).a(0.9)
                     } else {
                         WHITE.a((0.42 - dist * 0.07).max(0.12))
                     };
@@ -1958,6 +2170,59 @@ impl App {
         v
     }
 
+    fn draw_clipboard(&self, g: &Gfx, ui: &mut Ui, c: R) {
+        let n = now().secs;
+        if self.clips.is_empty() {
+            // icon 34 + gap 6 + title 22 + subtitle 18, centered in the body
+            let y = c.y + ((c.h - 80.0) / 2.0).max(0.0);
+            g.icon(ic::CLIP, R::new(c.x, y, c.w, 34.0), 24.0, T3);
+            g.text("Nothing copied yet", R::new(c.x, y + 40.0, c.w, 22.0), 14.0, 600, T2, Al::C);
+            g.text("Text you copy shows up here. Click an entry to copy it again.", R::new(c.x, y + 62.0, c.w, 18.0), 11.5, 400, T3, Al::C);
+            return;
+        }
+        // header: count + Clear all
+        let count = self.clips.len();
+        let head = format!("{count} {} · click to copy again · kept until Veyra closes", if count == 1 { "entry" } else { "entries" });
+        g.text(&head, R::new(c.x + 2.0, c.y, c.w - 90.0, 24.0), 11.5, 400, T3, Al::L);
+        let cr = R::new(c.right() - 74.0, c.y, 74.0, 24.0);
+        let hv = ui.hit(cr, Act::ClipClear);
+        g.rrect(cr, 12.0, if hv { RED.a(0.25) } else { surf(g, false) });
+        g.text("Clear all", cr, 11.5, 600, if hv { RED } else { btn_fg(g, T2) }, Al::C);
+
+        // list
+        let ly = c.y + 32.0;
+        let rh = 30.0;
+        let rows = ((c.bottom() - ly) / rh).floor().max(1.0) as usize;
+        let start = self.clip_scroll.min(count.saturating_sub(rows));
+        let copied = self.clip_copied.as_ref().filter(|(t, _)| t.elapsed() < Duration::from_millis(1400)).map(|(_, s)| s.as_str());
+        for (k, item) in self.clips.iter().enumerate().skip(start).take(rows) {
+            let r = R::new(c.x, ly + (k - start) as f32 * rh, c.w, rh - 2.0);
+            // the whole row copies; the x on top of it removes (registered last, so it wins)
+            let hv = ui.hit(r, Act::ClipCopy(k));
+            g.rrect(r, 9.0, if hv { WHITE.a(0.08) } else { WHITE.a(0.03) });
+            let right = 64.0;
+            g.text(&clip::preview(&item.text), R::new(r.x + 12.0, r.y, r.w - 12.0 - right, r.h), 13.0, 400, WHITE, Al::L);
+            if copied == Some(item.text.as_str()) {
+                g.icon(ic::CHECK, R::new(r.right() - 62.0, r.y, 16.0, r.h), 10.0, CLIP_C);
+                g.text("Copied", R::new(r.right() - 46.0, r.y, 42.0, r.h), 11.5, 600, CLIP_C, Al::L);
+            } else if hv {
+                let xr = R::new(r.right() - 30.0, r.y + 2.0, 26.0, r.h - 4.0);
+                let xh = ui.hit(xr, Act::ClipDel(k));
+                if xh {
+                    g.rrect(xr, 8.0, RED.a(0.2));
+                }
+                g.icon(ic::CLOSE, xr, 9.0, if xh { RED } else { T2 });
+            } else {
+                g.text(&ago(n - item.at), R::new(r.right() - right, r.y, right - 10.0, r.h), 11.5, 500, T3, Al::R);
+            }
+        }
+        // a hint that there is more below / above
+        if count > rows {
+            let shown = format!("{}-{} of {count}", start + 1, (start + rows).min(count));
+            g.text(&shown, R::new(c.x, c.bottom() - 2.0, c.w - 4.0, 14.0), 10.5, 500, T3, Al::R);
+        }
+    }
+
     fn draw_tasks(&self, g: &Gfx, ui: &mut Ui, c: R) {
         let n = now();
         // input row
@@ -2009,8 +2274,10 @@ impl App {
         let rh = 30.0;
         let rows = ((c.bottom() - ly) / rh).floor().max(1.0) as usize;
         if tasks.is_empty() {
-            g.text("No tasks yet", R::new(c.x, ly + 22.0, c.w, 22.0), 14.0, 600, T2, Al::C);
-            g.text("Type a task, set a time (type 14:30 or 30m, or use − / +), press Enter.", R::new(c.x, ly + 44.0, c.w, 18.0), 11.5, 400, T3, Al::C);
+            // title 22 + subtitle 18, centered in the space under the input row
+            let y = ly + ((c.bottom() - ly - 40.0) / 2.0).max(0.0);
+            g.text("No tasks yet", R::new(c.x, y, c.w, 22.0), 14.0, 600, T2, Al::C);
+            g.text("Type a task, set a time (type 14:30 or 30m, or use − / +), press Enter.", R::new(c.x, y + 22.0, c.w, 18.0), 11.5, 400, T3, Al::C);
             return;
         }
         let start = self.task_scroll.min(tasks.len().saturating_sub(rows));
@@ -2210,6 +2477,24 @@ impl App {
                 }
             }
             Act::ShelfCheck(i) => self.toggle_sel(i),
+            Act::ClipCopy(i) => {
+                // copy it again but leave the list as it is: the entry keeps its place
+                if let Some(t) = self.clips.get(i).map(|c| c.text.clone()) {
+                    if clip::write(self.hwnd, &t) {
+                        self.clip_ignore = Some(t.clone());
+                        self.clip_copied = Some((Instant::now(), t));
+                    }
+                }
+            }
+            Act::ClipDel(i) => {
+                if i < self.clips.len() {
+                    self.clips.remove(i);
+                }
+            }
+            Act::ClipClear => {
+                self.clips.clear();
+                self.clip_scroll = 0;
+            }
             Act::ShelfClear => {
                 self.shelf_sel.clear();
                 self.data.shelf.clear();
@@ -2300,14 +2585,14 @@ impl App {
                 if natural {
                     sound::chime();
                     let msg = format!("Time for a {}-minute break", self.data.focus.break_min);
-                    self.toast(TIcon::G(ic::TIMER), "Focus session complete", &msg, 8.0, BREAK_C, Some(Tab::Focus));
+                    self.toast(TIcon::G(ic::TIMER), "Focus session complete", &msg, 8.0, self.break_color(), Some(Tab::Focus));
                 }
             }
             PMode::Break => {
                 self.pomo.mode = PMode::Idle;
                 if natural {
                     sound::chime();
-                    self.toast(TIcon::G(ic::TIMER), "Break's over", "Ready for another focus session?", 8.0, FOCUS_C, Some(Tab::Focus));
+                    self.toast(TIcon::G(ic::TIMER), "Break's over", "Ready for another focus session?", 8.0, self.focus_color(), Some(Tab::Focus));
                 }
             }
             PMode::Idle => {}
@@ -2319,6 +2604,28 @@ impl App {
     pub fn tick(&mut self) {
         let n = Instant::now();
         let mut redraw = false;
+
+        if let Some(at) = self.clip_due {
+            if n >= at {
+                self.clip_due = None;
+                self.read_clipboard();
+            }
+        }
+
+        // new screenshots -> Shelf (one cheap folder check every 2 s)
+        if self.data.settings.screenshots && n >= self.shots_next {
+            self.shots_next = n + Duration::from_secs(2);
+            let new: Vec<String> = self.shots.poll().into_iter().filter(|p| !self.data.shelf.contains(p)).collect();
+            if !new.is_empty() {
+                let count = new.len();
+                self.data.shelf.extend(new);
+                self.shelf_scroll = self.shelf_max();
+                self.dirty = true;
+                let title = if count == 1 { "Screenshot added to Shelf".to_string() } else { format!("{count} screenshots added to Shelf") };
+                self.toast(TIcon::G(ic::FOLDER), &title, "Drag it anywhere from the Shelf", 4.0, SHELF_C, Some(Tab::Shelf));
+                redraw = true;
+            }
+        }
 
         if let Some(t) = &self.toast {
             if n >= t.until && !self.cursor_inside() {
@@ -2341,11 +2648,49 @@ impl App {
                 }
                 crate::util::trim_memory();
                 dbg_log("memory: trimmed");
+                if std::env::var_os("VEYRA_DEBUG").is_some() {
+                    dbg_log(&crate::util::heap_stats());
+                }
             }
         }
         if self.pomo.active() && !self.pomo.paused && self.pomo.remaining() <= 0.0 {
             self.finish_phase(true);
             redraw = true;
+        }
+
+        if let Some((at, k)) = self.demo_stress {
+            // VEYRA_STRESS_N: stop (closed) after that many steps, to watch memory settle
+            let max = std::env::var("VEYRA_STRESS_N").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(u32::MAX);
+            if k >= max && n >= at {
+                self.demo_stress = None;
+                dbg_log(&format!("stress done: {}", crate::util::heap_stats()));
+                self.kick();
+            } else if n >= at {
+                // VEYRA_STRESS=fetch: only fetch lyrics again; =toggle: only close / reopen;
+                // otherwise both (odd steps close, even steps reopen and fetch anew)
+                let mode = std::env::var("VEYRA_STRESS").unwrap_or_default();
+                if mode == "fetch" {
+                    self.lyr_key = 0;
+                    self.ensure_lyrics();
+                } else if k % 2 == 0 {
+                    self.collapse();
+                } else if mode == "water" {
+                    self.expand(Some(Tab::Water));
+                } else {
+                    self.lyrics_open = true;
+                    if mode != "toggle" {
+                        self.lyr_key = 0;
+                    }
+                    self.expand(Some(Tab::Media));
+                    self.ensure_lyrics();
+                }
+                let ms = std::env::var("VEYRA_STRESS_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500);
+                self.demo_stress = Some((n + Duration::from_millis(ms), k + 1));
+                if k % 10 == 0 {
+                    dbg_log(&format!("stress {k}: {}", crate::util::heap_stats()));
+                }
+                self.kick();
+            }
         }
 
         if let Some(at) = self.demo_switch {
@@ -2390,7 +2735,10 @@ impl App {
         }
 
         // a resize under a still cursor can produce a spurious WM_MOUSELEAVE: recover hover
-        if self.mouse.is_none() && self.cursor_inside() {
+        // (not while it is a line: it opens only on a real mouse movement over the line, and
+        // the island rectangle may still be the size of the panel that just closed)
+        let settling = self.no_hover_until.map(|t| n < t).unwrap_or(false);
+        if self.mouse.is_none() && self.view != ViewKey::Line && !settling && self.cursor_inside() {
             let mut p = POINT::default();
             unsafe {
                 let _ = GetCursorPos(&mut p);
@@ -2403,12 +2751,7 @@ impl App {
 
         // auto-collapse when the island is open but the user went elsewhere
         if self.expanded && !self.demo {
-            let fg = unsafe { GetForegroundWindow() };
-            if self.cursor_inside() {
-                self.collapse_at = None;
-            } else if fg != self.hwnd && self.collapse_at.is_none() {
-                self.collapse_at = Some(n + Duration::from_millis(if self.drag_expanded { 2500 } else { 1200 }));
-            }
+            self.arm_auto_close(n);
             if let Some(at) = self.collapse_at {
                 if n >= at && !self.cursor_inside() && !self.drag_hover {
                     self.collapse();
@@ -2435,7 +2778,8 @@ impl App {
                     _ => false,
                 });
         let fast = (compact && playing) || (self.expanded && self.tab == Tab::Media && self.lyrics_open && playing);
-        self.set_tick(if fast { 90 } else { 250 });
+        // quicker while a panel is about to close, so it closes on time
+        self.set_tick(if fast || (self.expanded && self.collapse_at.is_some()) { 90 } else { 250 });
         if (periodic || redraw) && !self.hidden {
             self.kick();
         }
@@ -2545,6 +2889,8 @@ impl App {
                     }
                 },
                 Event::Lyrics(key, r) => {
+                    // the download's buffers (JSON with every search hit) are freed by now
+                    crate::util::release_free_heap();
                     if key == self.lyr_key {
                         self.lyr = match r {
                             Some(v) if !v.is_empty() => Lyr::Found(v),
@@ -2685,6 +3031,9 @@ impl App {
             }
         }
         self.mouse = Some(p);
+        if self.expanded {
+            self.panel_entered = true;
+        }
         if let Some((Some(a), sx, sy)) = self.press {
             if (p.0 - sx).abs() + (p.1 - sy).abs() > 6.0 {
                 let paths: Vec<String> = match a {
@@ -2710,10 +3059,39 @@ impl App {
         self.kick();
     }
 
+    /// Decides whether (and when) the open panel should close by itself.
+    fn arm_auto_close(&mut self, n: Instant) {
+        if self.cursor_inside() {
+            self.panel_entered = true;
+            self.collapse_at = None;
+            return;
+        }
+        // typing, or holding the mouse button (dragging the seek bar): stay until that is over
+        let busy = self.input_focus || self.edit.is_some() || self.press.is_some();
+        let fg = unsafe { GetForegroundWindow() };
+        if self.collapse_at.is_none() {
+            if self.drag_expanded {
+                self.collapse_at = Some(n + Duration::from_millis(2500));
+            } else if self.panel_entered && !busy {
+                self.collapse_at = Some(n + PANEL_OUT);
+            } else if fg != self.hwnd {
+                self.collapse_at = Some(n + Duration::from_millis(1200));
+            }
+        } else if busy && fg == self.hwnd && !self.drag_expanded {
+            self.collapse_at = None;
+        }
+    }
+
     pub fn on_mouse_leave(&mut self) {
         self.tracking = false;
         self.mouse = None;
         self.hover_out = Some(Instant::now());
+        if self.expanded && !self.demo {
+            self.arm_auto_close(Instant::now());
+            if self.collapse_at.is_some() {
+                self.set_tick(90);
+            }
+        }
         self.kick();
     }
 
@@ -2800,6 +3178,13 @@ impl App {
                     self.task_scroll = (self.task_scroll + 1).min(self.data.tasks.len().saturating_sub(1));
                 } else {
                     self.task_scroll = self.task_scroll.saturating_sub(1);
+                }
+            }
+            (Tab::Clipboard, _) => {
+                if steps < 0 {
+                    self.clip_scroll = (self.clip_scroll + 1).min(self.clips.len().saturating_sub(1));
+                } else {
+                    self.clip_scroll = self.clip_scroll.saturating_sub(1);
                 }
             }
             (Tab::Shelf, _) => {
@@ -2917,11 +3302,59 @@ impl App {
         }
     }
 
+    pub fn menu_state(&self) -> tray::MenuState {
+        tray::MenuState {
+            autostart: self.autostart,
+            hidden: self.user_hidden,
+            line_mode: self.data.settings.line_mode,
+            screenshots: self.data.settings.screenshots,
+        }
+    }
+
+    /// The clipboard changed. Reading it right away would hold it open while the copying app
+    /// may still be finishing its copy (OLE apps flush after announcing it), making that app's
+    /// copy fail now and then; so read a moment later, from tick(). This also merges the two
+    /// notifications many apps send per copy.
+    pub fn on_clipboard(&mut self) {
+        if self.clip_due.is_none() {
+            self.clip_due = Some(Instant::now() + Duration::from_millis(150));
+        }
+    }
+
+    /// Remember a text copy (see clip.rs for what is skipped).
+    fn read_clipboard(&mut self) {
+        if let Some(t) = clip::read(self.hwnd) {
+            // the echo of an entry copied from the list itself
+            if self.clip_ignore.take().as_deref() == Some(t.as_str()) {
+                return;
+            }
+            if clip::push(&mut self.clips, t, now().secs) {
+                self.clip_scroll = 0;
+                // count only: copied text must never reach the log file
+                dbg_log(&format!("clipboard: {} entries", self.clips.len()));
+                if self.expanded && self.tab == Tab::Clipboard && !self.hidden {
+                    self.render();
+                }
+            }
+        }
+    }
+
     pub fn tray_cmd(&mut self, cmd: u32) {
         if cmd == tray::CMD_THEME {
             if let Some(p) = theme::ensure_file() {
                 tray::edit_file(&p);
             }
+        } else if cmd == tray::CMD_LINE {
+            self.data.settings.line_mode = !self.data.settings.line_mode;
+            self.dirty = true;
+            self.kick();
+        } else if cmd == tray::CMD_SHOTS {
+            self.data.settings.screenshots = !self.data.settings.screenshots;
+            if self.data.settings.screenshots {
+                // only screenshots taken from now on
+                self.shots = shots::Watcher::new();
+            }
+            self.dirty = true;
         } else if cmd == tray::CMD_AUTOSTART {
             self.autostart = !self.autostart;
             tray::set_autostart(self.autostart);
@@ -2970,13 +3403,14 @@ impl App {
 
 // ------------------------------------------------------------------ widgets
 
-fn tab_color(t: Tab) -> C {
+fn tab_color(g: &Gfx, t: Tab) -> C {
     match t {
         Tab::Media => WHITE,
-        Tab::Focus => FOCUS_C,
+        Tab::Focus => g.theme.timer.unwrap_or(FOCUS_C),
         Tab::Water => WATER_C,
         Tab::Shelf => SHELF_C,
         Tab::Tasks => TASK_C,
+        Tab::Clipboard => CLIP_C,
     }
 }
 
@@ -2991,6 +3425,7 @@ fn draw_tab_icon(g: &Gfx, t: Tab, r: R, col: C) {
         }
         Tab::Shelf => g.icon(ic::FOLDER, r, 14.0, col),
         Tab::Tasks => g.icon(ic::TASKS, r, 14.0, col),
+        Tab::Clipboard => g.icon(ic::CLIP, r, 14.0, col),
     }
 }
 
@@ -3061,8 +3496,12 @@ fn accent_btn(g: &Gfx, feature: C) -> C {
     g.theme.button_accent.unwrap_or(feature)
 }
 
-/// Text on a main button: black, or white when a custom `button_accent` is dark.
+/// Text on a main button: theme.conf `button_accent_text`, else black, or white when a custom
+/// `button_accent` is dark.
 fn accent_fg(g: &Gfx) -> C {
+    if let Some(t) = g.theme.button_accent_text {
+        return t;
+    }
     match g.theme.button_accent {
         Some(a) if crate::theme::luma(std::iter::once(a)) < 0.5 => C(0.9999, 0.9999, 0.9999, 1.0),
         _ => BLACK,
@@ -3217,6 +3656,20 @@ fn ext_color(ext: &str) -> C {
         "MP4" | "MOV" | "MKV" | "AVI" | "WEBM" => C::hex(0x12A594),
         "EXE" | "MSI" => C::hex(0x6E6E73),
         _ => C::hex(0x5B5B66),
+    }
+}
+
+/// "now", "5m", "2h", "3d": how long ago `secs` seconds were.
+fn ago(secs: i64) -> String {
+    let s = secs.max(0);
+    if s < 60 {
+        "now".into()
+    } else if s < 3600 {
+        format!("{}m", s / 60)
+    } else if s < 86400 {
+        format!("{}h", s / 3600)
+    } else {
+        format!("{}d", s / 86400)
     }
 }
 

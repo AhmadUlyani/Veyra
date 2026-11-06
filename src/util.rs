@@ -128,6 +128,47 @@ pub fn trim_memory() {
         if let Ok(h) = GetProcessHeap() {
             let _ = HeapCompact(h, HEAP_FLAGS(0));
         }
+        release_free_heap();
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
+}
+
+/// Hands the free blocks of every heap in the process back to Windows (Direct2D's and
+/// DirectWrite's included), done safely by Windows itself. Unlike `trim_memory` it leaves the
+/// working set alone, so it is fine while the island is open (e.g. right after a download).
+pub fn release_free_heap() {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Memory::{HeapOptimizeResources, HeapSetInformation};
+    /// HEAP_OPTIMIZE_RESOURCES_INFORMATION
+    #[repr(C)]
+    struct Optimize {
+        version: u32,
+        flags: u32,
+    }
+    let info = Optimize { version: 1, flags: 0 };
+    unsafe {
+        let _ = HeapSetInformation(
+            HANDLE::default(),
+            HeapOptimizeResources,
+            Some(&info as *const Optimize as *const core::ffi::c_void),
+            std::mem::size_of::<Optimize>(),
+        );
+    }
+}
+
+/// Debug aid: bytes allocated / committed over all heaps of this process (for leak checks).
+pub fn heap_stats() -> String {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Memory::{GetProcessHeaps, HeapSummary, HEAP_SUMMARY};
+    let mut heaps = vec![HANDLE::default(); 256];
+    let n = unsafe { GetProcessHeaps(&mut heaps) } as usize;
+    let (mut alloc, mut commit) = (0usize, 0usize);
+    for h in heaps.iter().take(n.min(heaps.len())) {
+        let mut s = HEAP_SUMMARY { cb: std::mem::size_of::<HEAP_SUMMARY>() as u32, ..Default::default() };
+        if unsafe { HeapSummary(*h, 0, &mut s) }.as_bool() {
+            alloc += s.cbAllocated;
+            commit += s.cbCommitted;
+        }
+    }
+    format!("{n} heaps, allocated {:.2} MB, committed {:.2} MB", alloc as f64 / 1048576.0, commit as f64 / 1048576.0)
 }

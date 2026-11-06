@@ -11,6 +11,16 @@ pub const CMD_AUTOSTART: u32 = 10;
 pub const CMD_QUIT: u32 = 11;
 pub const CMD_HIDE: u32 = 12;
 pub const CMD_THEME: u32 = 13;
+pub const CMD_LINE: u32 = 14;
+pub const CMD_SHOTS: u32 = 15;
+
+/// Check marks shown in the menu.
+pub struct MenuState {
+    pub autostart: bool,
+    pub hidden: bool,
+    pub line_mode: bool,
+    pub screenshots: bool,
+}
 
 fn nid(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
@@ -40,15 +50,17 @@ pub fn remove(hwnd: HWND) {
     }
 }
 
-pub fn menu(hwnd: HWND, autostart: bool, hidden: bool) -> u32 {
+pub fn menu(hwnd: HWND, st: &MenuState) -> u32 {
+    let check = |on: bool| if on { MF_STRING | MF_CHECKED } else { MF_STRING };
     unsafe {
         let Ok(m) = CreatePopupMenu() else { return 0 };
         let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, 0, w!("Veyra"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
-        let hide = if hidden { w!("Show Veyra") } else { w!("Hide Veyra") };
+        let hide = if st.hidden { w!("Show Veyra") } else { w!("Hide Veyra") };
         let _ = AppendMenuW(m, MF_STRING, CMD_HIDE as usize, hide);
-        let flags = if autostart { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let _ = AppendMenuW(m, flags, CMD_AUTOSTART as usize, w!("Start with Windows"));
+        let _ = AppendMenuW(m, check(st.line_mode), CMD_LINE as usize, w!("Shrink to a line until hovered"));
+        let _ = AppendMenuW(m, check(st.screenshots), CMD_SHOTS as usize, w!("Add screenshots to Shelf"));
+        let _ = AppendMenuW(m, check(st.autostart), CMD_AUTOSTART as usize, w!("Start with Windows"));
         let _ = AppendMenuW(m, MF_STRING, CMD_THEME as usize, w!("UI colors (theme.conf)..."));
         let _ = AppendMenuW(m, MF_STRING, CMD_QUIT as usize, w!("Quit Veyra"));
         let mut p = POINT::default();
