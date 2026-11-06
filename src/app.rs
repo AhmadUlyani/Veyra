@@ -2330,6 +2330,15 @@ impl App {
         p.x >= l && p.x < l + w && p.y >= t && p.y < t + h
     }
 
+    /// Whether the cursor is really over this window (not over its see-through pixels).
+    fn cursor_on_window(&self) -> bool {
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+            WindowFromPoint(p) == self.hwnd
+        }
+    }
+
     fn hit_at(&self, p: (f32, f32)) -> Option<Act> {
         self.hits.iter().rev().find(|(r, _)| r.contains(p)).map(|(_, a)| *a)
     }
@@ -2738,7 +2747,13 @@ impl App {
         // (not while it is a line: it opens only on a real mouse movement over the line, and
         // the island rectangle may still be the size of the panel that just closed)
         let settling = self.no_hover_until.map(|t| n < t).unwrap_or(false);
-        if self.mouse.is_none() && self.view != ViewKey::Line && !settling && self.cursor_inside() {
+        if self.mouse.is_none()
+            && !self.hidden
+            && self.view != ViewKey::Line
+            && !settling
+            && self.cursor_inside()
+            && self.cursor_on_window()
+        {
             let mut p = POINT::default();
             unsafe {
                 let _ = GetCursorPos(&mut p);
@@ -2746,7 +2761,18 @@ impl App {
             let s = self.gfx.scale;
             self.mouse = Some(((p.x - self.win.0) as f32 / s, (p.y - self.win.1) as f32 / s));
             self.tracking = false;
+            self.track_leave();
             redraw = true;
+        }
+
+        // the other way round: a WM_MOUSELEAVE can get lost (a full-screen game taking the
+        // mouse, for one), and then nothing would ever end the hover
+        if self.mouse.is_some() && !self.demo && !self.hidden && !self.cursor_on_window() {
+            let held = unsafe { GetCapture() } == self.hwnd;
+            if !held {
+                dbg_log("hover: lost WM_MOUSELEAVE, ending it");
+                self.on_mouse_leave();
+            }
         }
 
         // auto-collapse when the island is open but the user went elsewhere
@@ -3013,11 +3039,8 @@ impl App {
         (x / self.gfx.scale, y / self.gfx.scale)
     }
 
-    pub fn on_mouse_move(&mut self, lp: LPARAM) {
-        let p = self.local(lp);
-        if self.mouse.is_none() {
-            self.hover_in = Some(Instant::now());
-        }
+    /// Ask Windows for a WM_MOUSELEAVE, once per stay of the cursor on the window.
+    fn track_leave(&mut self) {
         if !self.tracking {
             self.tracking = true;
             let mut tme = TRACKMOUSEEVENT {
@@ -3030,6 +3053,14 @@ impl App {
                 let _ = TrackMouseEvent(&mut tme);
             }
         }
+    }
+
+    pub fn on_mouse_move(&mut self, lp: LPARAM) {
+        let p = self.local(lp);
+        if self.mouse.is_none() {
+            self.hover_in = Some(Instant::now());
+        }
+        self.track_leave();
         self.mouse = Some(p);
         if self.expanded {
             self.panel_entered = true;
@@ -3373,16 +3404,60 @@ impl App {
         if self.leaving.is_some() {
             return;
         }
-        let want = self.user_hidden || system::fullscreen_busy();
+        let want = self.user_hidden || system::fullscreen_busy(self.hidden);
         if want != self.hidden {
+            dbg_log(&format!("visibility: hidden={want} (by user: {})", self.user_hidden));
             self.hidden = want;
+            // a hidden window hears nothing more from the mouse, so what it knew is out of date
+            self.forget_pointer();
             unsafe {
-                let _ = ShowWindow(self.hwnd, if want { SW_HIDE } else { SW_SHOWNOACTIVATE });
+                if want {
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                } else {
+                    // to the very top: a game that made itself topmost went above the island
+                    // while it was hidden, and may still be open
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                }
             }
             if !want {
+                if self.data.settings.line_mode {
+                    // back as the line it was, not a pill left over from before or while hidden;
+                    // the window appearing under a resting cursor is not a hover yet
+                    self.no_hover_until = Some(Instant::now() + Duration::from_millis(350));
+                    if self.target().3 == ViewKey::Line {
+                        self.view = ViewKey::Line;
+                        self.line_from_pill = false;
+                    }
+                }
                 self.pop_in();
             }
         }
+    }
+
+    /// Drop everything known about the mouse, as if it had left long ago.
+    fn forget_pointer(&mut self) {
+        if self.press.take().is_some() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+        }
+        self.mouse = None;
+        self.tracking = false;
+        self.drag_hover = false;
+        self.hover_on = false;
+        self.hover_in = None;
+        self.hover_out = None;
+        self.hov = 0.0;
+        self.hov_v = 0.0;
+        self.isl_px = (0, 0, 0, 0);
     }
 
     /// Tray click or a second launch: unhide and open the island.

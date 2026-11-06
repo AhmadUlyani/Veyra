@@ -8,6 +8,7 @@ use windows::Networking::Connectivity::*;
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::*;
 use windows::Win32::Globalization::*;
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::Media::Audio::Endpoints::*;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::*;
@@ -265,11 +266,78 @@ pub fn lang_name(lid: u16) -> (String, String) {
 
 // ---------------------------------------------------------------- full screen
 
-pub fn fullscreen_busy() -> bool {
+/// What the foreground window says about a full-screen app being in front.
+#[derive(PartialEq, Debug)]
+enum Front {
+    /// The desktop or taskbar: whatever Windows still reports, nothing full-screen is in front.
+    Shell,
+    /// The Alt+Tab switcher and the like, on the way to another window: no news yet.
+    Switching,
+    /// An ordinary window: full screen only if it really covers the screen.
+    App,
+}
+
+fn front_kind(class: &str) -> Front {
+    match class {
+        "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" => Front::Shell,
+        "XamlExplorerHostIslandWindow" | "ForegroundStaging" | "MultitaskingViewFrame" | "TaskSwitcherWnd" => Front::Switching,
+        _ => Front::App,
+    }
+}
+
+unsafe fn covers_primary(h: HWND) -> bool {
+    // a normal maximized window, which fills the screen too when the taskbar auto-hides
+    if IsZoomed(h).as_bool() && GetWindowLongW(h, GWL_STYLE) as u32 & WS_THICKFRAME.0 != 0 {
+        return false;
+    }
+    let hm = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+    let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let mut r = RECT::default();
+    if !GetMonitorInfoW(hm, &mut mi).as_bool() || GetWindowRect(h, &mut r).is_err() {
+        return false;
+    }
+    let m = mi.rcMonitor;
+    r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+}
+
+/// Whether a full-screen app is in front of the primary screen (where the island lives).
+/// Windows keeps answering "busy" for as long as some games stay open behind other windows,
+/// so that answer only counts while the foreground window really fills the screen.
+/// `prev` is the last result, kept while the foreground is changing hands.
+pub fn fullscreen_busy(prev: bool) -> bool {
     unsafe {
-        match SHQueryUserNotificationState() {
-            Ok(s) => s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE,
-            Err(_) => false,
+        let s = match SHQueryUserNotificationState() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        if s == QUNS_PRESENTATION_MODE {
+            return true;
         }
+        if s != QUNS_BUSY && s != QUNS_RUNNING_D3D_FULL_SCREEN {
+            return false;
+        }
+        let fg = GetForegroundWindow();
+        if fg.0.is_null() {
+            return prev;
+        }
+        let mut b = [0u16; 64];
+        let n = GetClassNameW(fg, &mut b).max(0) as usize;
+        match front_kind(&String::from_utf16_lossy(&b[..n])) {
+            Front::Shell => false,
+            Front::Switching => prev,
+            Front::App => covers_primary(fg),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn front_windows() {
+        assert_eq!(front_kind("WorkerW"), Front::Shell);
+        assert_eq!(front_kind("XamlExplorerHostIslandWindow"), Front::Switching);
+        assert_eq!(front_kind("SDL_app"), Front::App);
     }
 }
