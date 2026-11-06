@@ -153,6 +153,11 @@ const LINE_H: f32 = 5.0;
 const LINE_OUT: Duration = Duration::from_millis(200);
 /// line <-> pill spring: critically damped, within 1 px of its target after about 250 ms
 const LINE_SPRING_W: f32 = 19.0;
+/// the pill dropping out of the line: it widens first, then comes down with its content
+const LINE_DROP_WIDEN: f32 = 28.0;
+const LINE_DROP_FALL: f32 = 16.0;
+/// and going back up: it rises first, then narrows into the line
+const LINE_RISE: f32 = 24.0;
 /// the open panel closes this long after the mouse left it
 const PANEL_OUT: Duration = Duration::from_millis(300);
 /// how far beside the line (each side) the mouse still opens it: about 1 cm (96 px = 1 inch)
@@ -368,6 +373,11 @@ pub struct App {
     /// the line came from the closed pill (its content fades out as it shrinks); from the open
     /// island or a notice it shrinks empty
     line_from_pill: bool,
+    /// the pill came down out of the line: its content slides down with it instead of fading in
+    pill_from_line: bool,
+    /// the screen's center in window coordinates: fixed on screen, unlike the center of an
+    /// island whose width moves by whole pixels
+    screen_cx: f32,
     /// right after closing in line mode: do not treat the cursor as hovering (see tick)
     no_hover_until: Option<Instant>,
     expanded: bool,
@@ -517,6 +527,8 @@ impl App {
             view_age: 0.0,
             view_wh: None,
             line_from_pill: false,
+            pill_from_line: false,
+            screen_cx: 0.0,
             no_hover_until: None,
             expanded: false,
             tab: Tab::Media,
@@ -1103,6 +1115,7 @@ impl App {
             if key == ViewKey::Line {
                 self.line_from_pill = matches!(self.view, ViewKey::Compact(_));
             }
+            self.pill_from_line = matches!(key, ViewKey::Compact(_)) && self.view == ViewKey::Line && self.sh.x < PILL_H;
             self.view = key;
         }
         if let Some(sl) = &mut self.slide {
@@ -1126,9 +1139,14 @@ impl App {
         while rem > 0.0 {
             let s = rem.min(1.0 / 240.0);
             if line_pill {
-                self.sw.step_fast(s, LINE_SPRING_W);
-                self.sh.step_fast(s, LINE_SPRING_W);
-                self.sr.step_fast(s, LINE_SPRING_W);
+                let (ww, hw) = if self.view == ViewKey::Line {
+                    (LINE_SPRING_W, LINE_RISE)
+                } else {
+                    (LINE_DROP_WIDEN, LINE_DROP_FALL)
+                };
+                self.sw.step_fast(s, ww);
+                self.sh.step_fast(s, hw);
+                self.sr.step_fast(s, hw);
             } else {
                 self.sw.step(s);
                 self.sh.step(s);
@@ -1287,6 +1305,7 @@ impl App {
         let hpx = (h * s).ceil() as i32 + 1;
         let left = self.mon_cx - wpx / 2;
         let top = self.mon_top;
+        self.screen_cx = (wpx / 2) as f32 / s;
         if !self.gfx.begin(wpx, hpx) {
             return;
         }
@@ -1327,30 +1346,36 @@ impl App {
         let f = SHOULDER.min(isl.h * 0.5);
         g.shoulder_bg(isl.x, isl.y, f, true, top, bottom);
         g.shoulder_bg(isl.right(), isl.y, f, false, top, bottom);
-        // Line mode: the pill grows out of (and shrinks back into) a 5 px line. Show its content
-        // only while the shape is nearly full height, so no half-clipped text flashes inside a
-        // shape that is still growing or already shrinking; when it goes back to a line the
-        // content fades out with the shape instead of vanishing at once.
-        let line_k = if self.data.settings.line_mode && matches!(self.view, ViewKey::Compact(_) | ViewKey::Line) {
-            smooth((isl.h - PILL_H * 0.75) / (PILL_H * 0.25))
+        // Line mode: the pill comes down out of (and goes back up into) the 5 px line, its content
+        // sliding with the shape's lower edge and clipped by it, as if it was above the screen.
+        let sliding = self.data.settings.line_mode
+            && match self.view {
+                ViewKey::Line => self.line_from_pill,
+                ViewKey::Compact(_) => self.pill_from_line,
+                _ => false,
+            };
+        // Whole pixels, and already home while the shape creeps its last pixel: the text must not
+        // change its blur on the way or hop into place when the spring finally snaps to rest.
+        let px = |v: f32| (v * self.gfx.scale).round() / self.gfx.scale;
+        let drop_y = if sliding {
+            px(-PILL_H * (1.0 - ((self.sh.x - LINE_H) / (PILL_H - 1.0 - LINE_H)).clamp(0.0, 1.0)))
         } else {
-            1.0
+            0.0
         };
         let mut alpha = if self.view == ViewKey::Line {
-            // only a pill fades its content into the line; the open island or a notice closing
+            // nothing of the pill left to show at the line; the open island or a notice closing
             // straight to the line must not flash the pill's content on the way
-            if self.line_from_pill {
-                line_k
+            if sliding && drop_y > -PILL_H + 0.01 {
+                1.0
             } else {
                 0.0
             }
+        } else if sliding {
+            1.0
+        } else if self.data.settings.line_mode && matches!(self.view, ViewKey::Compact(_)) {
+            smooth(self.view_age / 0.2)
         } else {
-            let fade = if self.data.settings.line_mode && matches!(self.view, ViewKey::Compact(_)) {
-                smooth(self.view_age / 0.2)
-            } else {
-                smooth((self.view_age - 0.05) / 0.22)
-            };
-            fade * line_k
+            smooth((self.view_age - 0.05) / 0.22)
         };
         if let Some((_, since, _)) = self.leaving {
             // content goes first, then the black shape follows it into the edge
@@ -1367,13 +1392,16 @@ impl App {
             let (w, h, _, _) = self.target();
             (w, h)
         });
-        let c = if self.view == ViewKey::Line {
-            // still shrinking from the pill: lay its fading content out at the pill's size
-            let (live, sec) = self.lives();
-            let cw = self.compact_width(live) + self.segment_width(sec);
-            R::new(isl.cx() - cw / 2.0, isl.y, cw, PILL_H)
-        } else {
-            R::new(isl.cx() - tw / 2.0, isl.y, tw, th)
+        let c = match self.view {
+            ViewKey::Line => {
+                // still rising from the pill: lay its content out at the pill's size
+                let (live, sec) = self.lives();
+                let cw = self.compact_width(live) + self.segment_width(sec);
+                R::new(px(self.screen_cx - cw / 2.0), isl.y + drop_y, cw, PILL_H)
+            }
+            // the shape's width (hover) moves its center by a pixel now and then: not the content
+            ViewKey::Compact(_) if self.data.settings.line_mode => R::new(px(self.screen_cx - tw / 2.0), isl.y + drop_y, tw, th),
+            _ => R::new(isl.cx() - tw / 2.0, isl.y, tw, th),
         };
         // Open and at rest, the content sits inside the shape clear of its rounded corners, so a
         // plain rectangle clip will do: no island-sized layer bitmap (about 2 MB with lyrics).
