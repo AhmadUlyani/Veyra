@@ -18,8 +18,11 @@ display's refresh rate (60/120/144/165 Hz…) by waiting for vertical blank. The
 | Clipboard | The last 30 pieces of text you copied, newest first. Click one to copy it again (it keeps its place), or remove it with ✕. Kept in memory only, so the list is gone when Veyra closes, and copies that apps mark as private (password managers) are skipped. Text only, no images. |
 
 System notices: volume and brightness HUD, Caps Lock, keyboard language changes,
-charger plugged/unplugged, low battery, Wi-Fi connected or lost, audio output/headphones changed.
+charger plugged/unplugged, low battery, Wi-Fi connected or lost, audio output/headphones changed, text copied.
 The island hides itself while a full-screen app or presentation is running.
+
+On the first run after installing, **Start with Windows** and **Add screenshots to Shelf** are on.
+Both can be switched off in the menu, and stay off after that.
 
 ## Usage
 
@@ -105,7 +108,7 @@ This runs `cargo build --release` and stamps the generated logo into `target\rel
 
 Or just double-click `rebuild.bat`: it closes the running Veyra, builds, and starts the new build.
 
-For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|clipboard|clipboardempty|tasksempty|toast|volume|focuspill|caps|capsoff|tws|charging|idle|line`
+For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|clipboard|clipboardempty|tasksempty|toast|volume|focuspill|caps|capsoff|tws|charging|copied|idle|line`
 opens a specific view on start (demo mode never saves data). `VEYRA_DEMO=stress` keeps opening and closing the island
 to check for leaks (`VEYRA_STRESS=fetch|toggle|water`, `VEYRA_STRESS_MS`, `VEYRA_STRESS_N`). `VEYRA_MOUSE=x,y` pretends
 the cursor rests there, to see hovers. `VEYRA_DEBUG=1` writes a log to `%TEMP%\veyra.log`.

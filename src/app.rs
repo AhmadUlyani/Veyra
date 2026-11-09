@@ -421,6 +421,10 @@ pub struct App {
     clip_ignore: Option<String>,
     /// the clipboard changed: read it at this time (see on_clipboard)
     clip_due: Option<Instant>,
+    /// when the last "Copied" notice was shown
+    copied_at: Option<Instant>,
+    /// the context menu of the island is open
+    menu_hold: bool,
     /// new screenshots -> Shelf
     shots: shots::Watcher,
     shots_next: Instant,
@@ -496,6 +500,7 @@ impl App {
         theme::ensure_file();
         let th = theme::load();
         gfx.set_theme(&th);
+        let first_run = store::first_run();
         let mut data = store::load();
         let today = now().date();
         if data.water.date != today {
@@ -505,6 +510,12 @@ impl App {
         if data.focus.date != today {
             data.focus.date = today;
             data.focus.sessions = 0;
+        }
+        if first_run && std::env::var_os("VEYRA_DEMO").is_none() {
+            // Fresh install: on by default. Saved at once, so what the user changes later stays.
+            tray::set_autostart(true);
+            data.settings.screenshots = true;
+            store::save(&data);
         }
         let media_tx = crate::media::spawn();
         let audio = system::Audio::new();
@@ -567,6 +578,8 @@ impl App {
             clip_copied: None,
             clip_ignore: None,
             clip_due: None,
+            copied_at: None,
+            menu_hold: false,
             shots: shots::Watcher::new(),
             shots_next: Instant::now(),
             shelf_scroll: 0,
@@ -755,6 +768,7 @@ impl App {
             "caps" => self.toast(TIcon::Txt("⇪".into()), "Caps Lock on", "", 600.0, GREEN, None),
             "capsoff" => self.toast(TIcon::Txt("⇪".into()), "Caps Lock off", "", 600.0, WHITE, None),
             "tws" => self.toast(TIcon::G(ic::HEADPHONE), "Headphones connected", "Galaxy Buds2 Pro", 600.0, WHITE, None),
+            "copied" => self.toast(TIcon::G(ic::CLIP), "Text copied", "", 600.0, WHITE, None),
             "charging" => self.toast(TIcon::Battery(0.64, true), "Charging", "64% · plugged in", 600.0, GREEN, None),
             "idle" => self.demo_idle = true,
             "editwater" => {
@@ -1241,7 +1255,8 @@ impl App {
         let out_delay = if self.data.settings.line_mode { LINE_OUT } else { HOVER_OUT };
         // just closed in line mode: the panel is still shrinking under the cursor, no hover yet
         let settling = self.no_hover_until.map(|t| n < t).unwrap_or(false);
-        let raw = compact && !settling && (self.mouse.is_some() || self.drag_hover);
+        // the island's own menu took the mouse away: it stays as it is until the menu is gone
+        let raw = compact && (self.menu_hold || (!settling && (self.mouse.is_some() || self.drag_hover)));
         // a cursor waiting out the settling time: keep frames coming so it is noticed afterwards
         let mut pending = compact && settling && self.mouse.is_some();
         if !compact {
@@ -2804,7 +2819,7 @@ impl App {
         }
 
         // auto-collapse when the island is open but the user went elsewhere
-        if self.expanded && !self.demo {
+        if self.expanded && !self.demo && !self.menu_hold {
             self.arm_auto_close(n);
             if let Some(at) = self.collapse_at {
                 if n >= at && !self.cursor_inside() && !self.drag_hover {
@@ -3143,6 +3158,10 @@ impl App {
 
     pub fn on_mouse_leave(&mut self) {
         self.tracking = false;
+        if self.menu_hold {
+            // the island's own menu took the mouse: settled when the menu closes (menu_closed)
+            return;
+        }
         self.mouse = None;
         self.hover_out = Some(Instant::now());
         if self.expanded && !self.demo {
@@ -3201,7 +3220,29 @@ impl App {
     }
 
     pub fn on_rup(&mut self) {
+        self.menu_hold = true;
         self.deferred = Some(Deferred::Menu);
+    }
+
+    /// The menu is gone: back to what the mouse is really doing.
+    pub fn menu_closed(&mut self) {
+        if !self.menu_hold {
+            return;
+        }
+        self.menu_hold = false;
+        self.tracking = false;
+        if self.cursor_inside() && self.cursor_on_window() {
+            let mut p = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut p);
+            }
+            let s = self.gfx.scale;
+            self.mouse = Some(((p.x - self.win.0) as f32 / s, (p.y - self.win.1) as f32 / s));
+            self.track_leave();
+            self.kick();
+        } else {
+            self.on_mouse_leave();
+        }
     }
 
     pub fn on_wheel(&mut self, wp: WPARAM, lp: LPARAM) {
@@ -3262,7 +3303,7 @@ impl App {
     pub fn on_activate(&mut self, active: bool) {
         if !active {
             self.input_focus = false;
-            if self.expanded && !self.drag_expanded && !self.demo && !self.cursor_inside() {
+            if self.expanded && !self.drag_expanded && !self.demo && !self.menu_hold && !self.cursor_inside() {
                 dbg_log("collapse: deactivate");
                 self.collapse();
             }
@@ -3387,7 +3428,9 @@ impl App {
             if self.clip_ignore.take().as_deref() == Some(t.as_str()) {
                 return;
             }
-            if clip::push(&mut self.clips, t, now().secs) {
+            let blank = t.trim().is_empty();
+            let added = clip::push(&mut self.clips, t, now().secs);
+            if added {
                 self.clip_scroll = 0;
                 // count only: copied text must never reach the log file
                 dbg_log(&format!("clipboard: {} entries", self.clips.len()));
@@ -3395,6 +3438,20 @@ impl App {
                     self.render();
                 }
             }
+            // copying the same text again is a copy too, but some apps announce one copy twice
+            let again = self.copied_at.map(|t| t.elapsed() >= Duration::from_secs(1)).unwrap_or(true);
+            if !blank && (added || again) {
+                self.copied_at = Some(Instant::now());
+                self.copied_notice();
+            }
+        }
+    }
+
+    /// A small pill. Not over the open panel, and not over a reminder that can be tapped.
+    fn copied_notice(&mut self) {
+        let reminder = self.toast.as_ref().map(|t| t.tab.is_some()).unwrap_or(false);
+        if !self.expanded && !reminder && !self.demo {
+            self.toast(TIcon::G(ic::CLIP), "Text copied", "", 1.4, WHITE, None);
         }
     }
 

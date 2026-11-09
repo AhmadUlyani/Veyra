@@ -156,6 +156,7 @@ fn run_deferred(hwnd: HWND, d: Deferred) {
         Deferred::Menu => {
             let Some(st) = with_app(|a| a.menu_state()) else { return };
             let cmd = tray::menu(hwnd, &st);
+            with_app(|a| a.menu_closed());
             if cmd == tray::CMD_QUIT {
                 // plays the closing animation, then closes the window
                 with_app(|a| a.begin_quit());

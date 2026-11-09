@@ -84,6 +84,11 @@ fn path() -> Option<PathBuf> {
     Some(p)
 }
 
+/// No data file yet: Veyra has never run for this user.
+pub fn first_run() -> bool {
+    path().map(|p| !p.join("data.json").exists()).unwrap_or(false)
+}
+
 pub fn load() -> Data {
     path()
         .and_then(|p| std::fs::read_to_string(p.join("data.json")).ok())
@@ -99,5 +104,21 @@ pub fn save(d: &Data) {
         if std::fs::write(&tmp, s).is_ok() {
             let _ = std::fs::rename(&tmp, dir.join("data.json"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshots_on_by_default() {
+        assert!(Data::default().settings.screenshots);
+        // a data file from before the setting existed
+        let d: Data = serde_json::from_str("{}").unwrap();
+        assert!(d.settings.screenshots);
+        // the user's choice stays
+        let d: Data = serde_json::from_str(r#"{"settings":{"screenshots":false}}"#).unwrap();
+        assert!(!d.settings.screenshots);
     }
 }
