@@ -219,6 +219,7 @@ enum Act {
     ClipCopy(usize),
     ClipDel(usize),
     ClipClear,
+    ClipCopyAll,
     Toast,
     VolBar(R),
 }
@@ -420,6 +421,8 @@ pub struct App {
     clip_copied: Option<(Instant, String)>,
     /// text just dropped onto the island (its row says "Saved" for a moment)
     clip_dropped: Option<(Instant, String)>,
+    /// when "Copy all" last copied the whole list (its button says "Copied" for a moment)
+    clip_all_at: Option<Instant>,
     /// text Veyra itself just put on the clipboard: its echo must not reorder the history
     clip_ignore: Option<String>,
     /// the clipboard changed: read it at this time (see on_clipboard)
@@ -584,6 +587,7 @@ impl App {
             clip_scroll: 0,
             clip_copied: None,
             clip_dropped: None,
+            clip_all_at: None,
             clip_ignore: None,
             clip_due: None,
             copied_at: None,
@@ -2300,9 +2304,25 @@ impl App {
         }
         // header: count + Clear all
         let count = self.clips.len();
-        let head = format!("{count} {} · click to copy again · kept until Veyra closes", if count == 1 { "entry" } else { "entries" });
-        g.text(&head, R::new(c.x + 2.0, c.y, c.w - 90.0, 24.0), 11.5, 400, T3, Al::L);
         let cr = R::new(c.right() - 74.0, c.y, 74.0, 24.0);
+        let ar = R::new(cr.x - 8.0 - 84.0, c.y, 84.0, 24.0);
+        // the long header when it fits beside the buttons, the short one otherwise
+        let what = if count == 1 { "entry" } else { "entries" };
+        let room = ar.x - c.x - 10.0;
+        let long = format!("{count} {what} · click to copy again · kept until Veyra closes");
+        let head = if g.measure(&long, 11.5, 400) <= room { long } else { format!("{count} {what} · click to copy again") };
+        g.text(&head, R::new(c.x + 2.0, c.y, room, 24.0), 11.5, 400, T3, Al::L);
+        let done = self.clip_all_at.map(|t| t.elapsed() < Duration::from_millis(1400)).unwrap_or(false);
+        let hv = ui.hit(ar, Act::ClipCopyAll);
+        g.rrect(ar, 12.0, if hv || done { CLIP_C.a(0.3) } else { CLIP_C.a(0.16) });
+        if done {
+            let tw = g.measure("Copied", 11.5, 600);
+            let x = ar.cx() - (tw + 14.0) / 2.0;
+            g.icon(ic::CHECK, R::new(x, ar.y, 10.0, ar.h), 10.0, CLIP_C.mix(WHITE, 0.35));
+            g.text("Copied", R::new(x + 14.0, ar.y, tw + 2.0, ar.h), 11.5, 600, CLIP_C.mix(WHITE, 0.35), Al::L);
+        } else {
+            g.text("Copy all", ar, 11.5, 600, CLIP_C.mix(WHITE, 0.35), Al::C);
+        }
         let hv = ui.hit(cr, Act::ClipClear);
         g.rrect(cr, 12.0, if hv { RED.a(0.25) } else { surf(g, false) });
         g.text("Clear all", cr, 11.5, 600, if hv { RED } else { btn_fg(g, T2) }, Al::C);
@@ -2627,6 +2647,17 @@ impl App {
             Act::ClipDel(i) => {
                 if i < self.clips.len() {
                     self.clips.remove(i);
+                }
+            }
+            // every entry, oldest first (the order they were copied in), one per line
+            Act::ClipCopyAll => {
+                if !self.clips.is_empty() {
+                    let all = self.clips.iter().rev().map(|c| c.text.trim_end()).collect::<Vec<_>>().join("\r\n");
+                    if clip::write(self.hwnd, &all) {
+                        // the combined text must not come back as a new entry
+                        self.clip_ignore = Some(all);
+                        self.clip_all_at = Some(Instant::now());
+                    }
                 }
             }
             Act::ClipClear => {
