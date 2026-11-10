@@ -15,6 +15,7 @@ mod sound;
 mod store;
 mod system;
 mod theme;
+mod thumbs;
 mod tray;
 mod util;
 mod vsync;

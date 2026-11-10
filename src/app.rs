@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,7 @@ use crate::lyrics::{self, Line};
 use crate::media::{MediaCmd, MediaState};
 use crate::store::{self, Data, Task};
 use crate::util::*;
-use crate::{clip, shelf, shots, sound, system, theme, tray};
+use crate::{clip, shelf, shots, sound, system, theme, thumbs, tray};
 
 // ------------------------------------------------------------------ style
 
@@ -417,6 +418,8 @@ pub struct App {
     clip_scroll: usize,
     /// which history entry was copied back from the list, and when (for the "Copied" mark)
     clip_copied: Option<(Instant, String)>,
+    /// text just dropped onto the island (its row says "Saved" for a moment)
+    clip_dropped: Option<(Instant, String)>,
     /// text Veyra itself just put on the clipboard: its echo must not reorder the history
     clip_ignore: Option<String>,
     /// the clipboard changed: read it at this time (see on_clipboard)
@@ -432,6 +435,10 @@ pub struct App {
     /// animated shelf position (in tiles), slides toward `shelf_scroll`
     shelf_x: f32,
     drag_hover: bool,
+    /// the drag over the island carries text (it goes to the Clipboard tab)
+    drag_text: bool,
+    /// Shelf image previews by path; None while decoding (or when the file is not readable)
+    thumbs: HashMap<String, Option<ID2D1Bitmap>>,
     drag_expanded: bool,
     collapse_at: Option<Instant>,
     /// the mouse has been over the panel since it opened (a panel opened from the tray, with
@@ -576,6 +583,7 @@ impl App {
             clips: Vec::new(),
             clip_scroll: 0,
             clip_copied: None,
+            clip_dropped: None,
             clip_ignore: None,
             clip_due: None,
             copied_at: None,
@@ -585,6 +593,8 @@ impl App {
             shelf_scroll: 0,
             shelf_x: 0.0,
             drag_hover: false,
+            drag_text: false,
+            thumbs: HashMap::new(),
             drag_expanded: false,
             collapse_at: None,
             panel_entered: false,
@@ -717,6 +727,30 @@ impl App {
                     self.data.shelf = vec![format!(r"{win}\notepad.exe"), format!(r"{win}\win.ini"), format!(r"{win}\System32")];
                 }
                 self.expand(Some(Tab::Shelf));
+            }
+            // image previews: a few files from VEYRA_DEMO_DIR next to a non-image file
+            "shelfimg" => {
+                if let Some(dir) = std::env::var_os("VEYRA_DEMO_DIR") {
+                    let mut imgs: Vec<String> = std::fs::read_dir(dir)
+                        .map(|r| r.flatten().map(|e| e.path().to_string_lossy().into_owned()).filter(|p| thumbs::is_image(p)).take(4).collect())
+                        .unwrap_or_default();
+                    let win = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+                    imgs.push(format!(r"{win}\win.ini"));
+                    self.data.shelf = imgs;
+                }
+                self.expand(Some(Tab::Shelf));
+            }
+            // text dragged over the island (empty / filled Clipboard tab)
+            "cliphover" | "cliphoverfull" => {
+                if v == "cliphoverfull" {
+                    let n = now().secs;
+                    clip::push(&mut self.clips, "Meeting moved to 3 pm".into(), n - 300);
+                    clip::push(&mut self.clips, "https://example.com/report".into(), n - 60);
+                    self.clip_dropped = Some((Instant::now() + Duration::from_secs(60), "https://example.com/report".into()));
+                }
+                self.drag_hover = true;
+                self.drag_text = true;
+                self.expand(Some(Tab::Clipboard));
             }
             // leak check: keeps re-fetching lyrics and opening / closing the island
             "stress" => {
@@ -983,6 +1017,7 @@ impl App {
         self.expanded = false;
         self.input_focus = false;
         self.drag_expanded = false;
+        system::watch_clicks(false);
         self.collapse_at = None;
         self.press = None;
         if self.data.settings.line_mode {
@@ -1302,6 +1337,7 @@ impl App {
     }
 
     fn render(&mut self) {
+        self.sync_thumbs();
         let s = self.gfx.scale;
         let w = (self.sw.x + HOVER_W * self.hov).max(1.0);
         let h = (self.sh.x + HOVER_H * self.hov).max(0.0);
@@ -2046,7 +2082,19 @@ impl App {
                 .map(|e| e.to_string_lossy().to_uppercase())
                 .unwrap_or_default();
             let badge = R::new(t.cx() - 17.0, t.y + 10.0, 34.0, 40.0);
-            if is_dir {
+            if let Some(Some(b)) = self.thumbs.get(path) {
+                let pr = R::new(t.x + 10.0, t.y + 8.0, t.w - 20.0, 45.0);
+                g.bitmap(b, pr, 7.0);
+                g.rrect_stroke(pr.inset(0.5, 0.5), 6.5, WHITE.a(0.14), 1.0, false);
+                // the file type, small, in the corner
+                let e: String = ext.chars().take(4).collect();
+                if !e.is_empty() {
+                    let lw = g.measure(&e, 8.5, 700) + 8.0;
+                    let lr = R::new(pr.right() - lw - 3.0, pr.bottom() - 15.0, lw, 12.0);
+                    g.rrect(lr, 4.0, ext_color(&ext).a(0.92));
+                    g.text(&e, lr, 8.5, 700, WHITE, Al::C);
+                }
+            } else if is_dir {
                 g.icon(ic::FOLDER, badge, 28.0, SHELF_C);
             } else {
                 let bc = ext_color(&ext);
@@ -2119,6 +2167,26 @@ impl App {
         g.text("Clear all", cr, 11.5, 600, if hv { RED } else { btn_fg(g, T2) }, Al::C);
         if self.drag_hover {
             g.rrect_stroke(c.inset(-4.0, -4.0), 16.0, SHELF_C, 1.5, true);
+        }
+    }
+
+    /// Ask for previews of the image tiles in view (and the next page, so scrolling finds
+    /// them ready); forget the ones no longer on the Shelf.
+    fn sync_thumbs(&mut self) {
+        if !self.expanded || self.tab != Tab::Shelf {
+            return;
+        }
+        let shelf = &self.data.shelf;
+        if self.thumbs.len() > shelf.len() || self.thumbs.keys().any(|k| !shelf.contains(k)) {
+            self.thumbs.retain(|k, _| shelf.contains(k));
+        }
+        let per = shelf_per(SHELF_BODY_W);
+        let first = (self.shelf_x.max(0.0).floor() as usize).saturating_sub(per);
+        for p in shelf.iter().skip(first).take(per * 3 + 1) {
+            if thumbs::is_image(p) && !self.thumbs.contains_key(p) {
+                self.thumbs.insert(p.clone(), None);
+                thumbs::request(p);
+            }
         }
     }
 
@@ -2215,12 +2283,19 @@ impl App {
 
     fn draw_clipboard(&self, g: &Gfx, ui: &mut Ui, c: R) {
         let n = now().secs;
+        let drop = self.drag_hover && self.drag_text;
         if self.clips.is_empty() {
+            if drop {
+                let r = c.inset(2.0, 2.0);
+                g.rrect(r, 16.0, CLIP_C.a(0.12));
+                g.rrect_stroke(r, 16.0, CLIP_C, 1.5, true);
+            }
             // icon 34 + gap 6 + title 22 + subtitle 18, centered in the body
             let y = c.y + ((c.h - 80.0) / 2.0).max(0.0);
-            g.icon(ic::CLIP, R::new(c.x, y, c.w, 34.0), 24.0, T3);
-            g.text("Nothing copied yet", R::new(c.x, y + 40.0, c.w, 22.0), 14.0, 600, T2, Al::C);
-            g.text("Text you copy shows up here. Click an entry to copy it again.", R::new(c.x, y + 62.0, c.w, 18.0), 11.5, 400, T3, Al::C);
+            g.icon(ic::CLIP, R::new(c.x, y, c.w, 34.0), 24.0, if drop { CLIP_C } else { T3 });
+            let title = if drop { "Release to save the text" } else { "Nothing copied yet" };
+            g.text(title, R::new(c.x, y + 40.0, c.w, 22.0), 14.0, 600, if drop { WHITE } else { T2 }, Al::C);
+            g.text("Text you copy or drop on Veyra shows up here. Click an entry to copy it again.", R::new(c.x, y + 62.0, c.w, 18.0), 11.5, 400, T3, Al::C);
             return;
         }
         // header: count + Clear all
@@ -2238,6 +2313,7 @@ impl App {
         let rows = ((c.bottom() - ly) / rh).floor().max(1.0) as usize;
         let start = self.clip_scroll.min(count.saturating_sub(rows));
         let copied = self.clip_copied.as_ref().filter(|(t, _)| t.elapsed() < Duration::from_millis(1400)).map(|(_, s)| s.as_str());
+        let dropped = self.clip_dropped.as_ref().filter(|(t, _)| t.elapsed() < Duration::from_millis(1400)).map(|(_, s)| s.as_str());
         for (k, item) in self.clips.iter().enumerate().skip(start).take(rows) {
             let r = R::new(c.x, ly + (k - start) as f32 * rh, c.w, rh - 2.0);
             // the whole row copies; the x on top of it removes (registered last, so it wins)
@@ -2245,9 +2321,16 @@ impl App {
             g.rrect(r, 9.0, if hv { WHITE.a(0.08) } else { WHITE.a(0.03) });
             let right = 64.0;
             g.text(&clip::preview(&item.text), R::new(r.x + 12.0, r.y, r.w - 12.0 - right, r.h), 13.0, 400, WHITE, Al::L);
-            if copied == Some(item.text.as_str()) {
+            let mark = if copied == Some(item.text.as_str()) {
+                Some("Copied")
+            } else if dropped == Some(item.text.as_str()) {
+                Some("Saved")
+            } else {
+                None
+            };
+            if let Some(m) = mark {
                 g.icon(ic::CHECK, R::new(r.right() - 62.0, r.y, 16.0, r.h), 10.0, CLIP_C);
-                g.text("Copied", R::new(r.right() - 46.0, r.y, 42.0, r.h), 11.5, 600, CLIP_C, Al::L);
+                g.text(m, R::new(r.right() - 46.0, r.y, 42.0, r.h), 11.5, 600, CLIP_C, Al::L);
             } else if hv {
                 let xr = R::new(r.right() - 30.0, r.y + 2.0, 26.0, r.h - 4.0);
                 let xh = ui.hit(xr, Act::ClipDel(k));
@@ -2263,6 +2346,9 @@ impl App {
         if count > rows {
             let shown = format!("{}-{} of {count}", start + 1, (start + rows).min(count));
             g.text(&shown, R::new(c.x, c.bottom() - 2.0, c.w - 4.0, 14.0), 10.5, 500, T3, Al::R);
+        }
+        if drop {
+            g.rrect_stroke(c.inset(-4.0, -4.0), 16.0, CLIP_C, 1.5, true);
         }
     }
 
@@ -2698,6 +2784,8 @@ impl App {
                 if self.win.2 > 0 && self.win.3 > 0 {
                     self.gfx.trim(self.win.2, self.win.3);
                 }
+                // previews come back (decoded again) the next time the Shelf opens
+                self.thumbs.clear();
                 crate::util::trim_memory();
                 dbg_log("memory: trimmed");
                 if std::env::var_os("VEYRA_DEBUG").is_some() {
@@ -2992,15 +3080,24 @@ impl App {
                     let title = if self.caps { "Caps Lock on" } else { "Caps Lock off" };
                     self.toast(TIcon::Txt("⇪".into()), title, "", 1.4, if self.caps { GREEN } else { WHITE }, None);
                 }
-                Event::DragEnter => {
+                Event::DragEnter(text) => {
                     self.drag_hover = true;
+                    self.drag_text = text;
                     self.collapse_at = None;
                     if !self.expanded {
                         self.expanded = true;
                         self.drag_expanded = true;
+                        self.panel_entered = false;
+                        system::watch_clicks(true);
                         self.toast = None;
                     }
-                    self.tab = Tab::Shelf;
+                    self.tab = if text { Tab::Clipboard } else { Tab::Shelf };
+                }
+                Event::MouseDown => {
+                    // opened by a drag, so not the active window: a click elsewhere closes it
+                    if self.expanded && self.drag_expanded && !self.drag_hover && !self.cursor_inside() {
+                        self.collapse();
+                    }
                 }
                 Event::DragLeave => {
                     self.drag_hover = false;
@@ -3020,6 +3117,25 @@ impl App {
                     self.dirty = true;
                     if self.drag_expanded {
                         self.collapse_at = Some(Instant::now() + Duration::from_millis(2500));
+                    }
+                }
+                Event::DropText(t) => {
+                    self.drag_hover = false;
+                    self.drag_text = false;
+                    // kept in the history only: what is on the Windows clipboard stays as it is
+                    if clip::push(&mut self.clips, t, now().secs) {
+                        self.clip_scroll = 0;
+                        self.clip_dropped = self.clips.first().map(|i| (Instant::now(), i.text.clone()));
+                        dbg_log(&format!("clipboard: {} entries (dropped)", self.clips.len()));
+                    }
+                    if self.drag_expanded {
+                        self.collapse_at = Some(Instant::now() + Duration::from_millis(2500));
+                    }
+                }
+                Event::Thumb(p, t) => {
+                    // only while the file is still on the Shelf (it may be gone by now)
+                    if let Some(slot) = self.thumbs.get_mut(&p) {
+                        *slot = t.and_then(|t| self.gfx.create_bitmap(t.w, t.h, &t.px));
                     }
                 }
             }
@@ -3145,7 +3261,10 @@ impl App {
         let fg = unsafe { GetForegroundWindow() };
         if self.collapse_at.is_none() {
             if self.drag_expanded {
-                self.collapse_at = Some(n + Duration::from_millis(2500));
+                // after the drop the cursor came back over the island and has now left it: the
+                // file is on the Shelf, so close about as soon as the drag leaving would
+                let wait = if self.panel_entered { 700 } else { 2500 };
+                self.collapse_at = Some(n + Duration::from_millis(wait));
             } else if self.panel_entered && !busy {
                 self.collapse_at = Some(n + PANEL_OUT);
             } else if fg != self.hwnd {

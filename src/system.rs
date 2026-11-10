@@ -1,7 +1,7 @@
 //! System watchers: volume, audio output device, network, battery, brightness,
 //! Caps Lock, keyboard layout and full-screen detection.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use windows::core::*;
 use windows::Networking::Connectivity::*;
@@ -225,6 +225,33 @@ pub fn install_kb_hook() {
     unsafe {
         let h = GetModuleHandleW(None).unwrap_or_default();
         let _ = SetWindowsHookExW(WH_KEYBOARD_LL, Some(kb_proc), HINSTANCE(h.0), 0);
+    }
+}
+
+static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+
+unsafe extern "system" fn mouse_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if code >= 0 && matches!(w.0 as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
+        post(Event::MouseDown);
+    }
+    CallNextHookEx(HHOOK::default(), code, w, l)
+}
+
+/// Watch for clicks anywhere on the screen (Event::MouseDown). Needed while the island is open
+/// without being the active window (opened by a drag): clicking elsewhere then deactivates
+/// nothing, so this is the only way to see it.
+pub fn watch_clicks(on: bool) {
+    unsafe {
+        let cur = MOUSE_HOOK.load(Ordering::Relaxed);
+        if on && cur == 0 {
+            let h = GetModuleHandleW(None).unwrap_or_default();
+            if let Ok(hk) = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), HINSTANCE(h.0), 0) {
+                MOUSE_HOOK.store(hk.0 as isize, Ordering::Relaxed);
+            }
+        } else if !on && cur != 0 {
+            let _ = UnhookWindowsHookEx(HHOOK(cur as *mut _));
+            MOUSE_HOOK.store(0, Ordering::Relaxed);
+        }
     }
 }
 

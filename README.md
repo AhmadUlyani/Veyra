@@ -13,9 +13,9 @@ display's refresh rate (60/120/144/165 Hz…) by waiting for vertical blank. The
 | Lyrics | The speech-bubble button splits the island: live synced lyrics from [lrclib.net](https://lrclib.net). Click a line to jump to it. |
 | Focus | Pomodoro timer (default 25/5), countdown in the compact pill, soft chime when a phase ends. |
 | Water | Bottle size, daily goal, reminder interval. Reminders run 07:00–23:00 until you reach the goal; switch them off with the Reminders toggle. |
-| Shelf | Drag files onto the island to keep them, drag them back out into chats, emails or folders. Click a file to open it. With many files, scroll to slide through them. New screenshots (saved in Pictures\Screenshots by Win+PrtScn or the Snipping Tool) are added automatically; switch that off in the tray menu. |
+| Shelf | Drag files onto the island to keep them, drag them back out into chats, emails or folders. Images show a small preview. Click a file to open it. With many files, scroll to slide through them. New screenshots (saved in Pictures\Screenshots by Win+PrtScn or the Snipping Tool) are added automatically; switch that off in the tray menu. |
 | Tasks | Add tasks with an optional time (− / + or the mouse wheel, ±15 / ±5 min). The island pings you when a task is due. |
-| Clipboard | The last 30 pieces of text you copied, newest first. Click one to copy it again (it keeps its place), or remove it with ✕. Kept in memory only, so the list is gone when Veyra closes, and copies that apps mark as private (password managers) are skipped. Text only, no images. |
+| Clipboard | The last 30 pieces of text you copied, newest first. Click one to copy it again (it keeps its place), or remove it with ✕. Text dragged onto the island (from a browser or an editor) is added here too, without touching what is on the Windows clipboard. Kept in memory only, so the list is gone when Veyra closes, and copies that apps mark as private (password managers) are skipped. Text only, no images. |
 
 System notices: volume and brightness HUD, Caps Lock, keyboard language changes,
 charger plugged/unplugged, low battery, Wi-Fi connected or lost, audio output/headphones changed, text copied.
@@ -108,7 +108,7 @@ This runs `cargo build --release` and stamps the generated logo into `target\rel
 
 Or just double-click `rebuild.bat`: it closes the running Veyra, builds, and starts the new build.
 
-For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|clipboard|clipboardempty|tasksempty|toast|volume|focuspill|caps|capsoff|tws|charging|copied|idle|line`
+For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|clipboard|clipboardempty|tasksempty|toast|volume|focuspill|shelfimg|cliphover|cliphoverfull|caps|capsoff|tws|charging|copied|idle|line`
 opens a specific view on start (demo mode never saves data). `VEYRA_DEMO=stress` keeps opening and closing the island
 to check for leaks (`VEYRA_STRESS=fetch|toggle|water`, `VEYRA_STRESS_MS`, `VEYRA_STRESS_N`). `VEYRA_MOUSE=x,y` pretends
 the cursor rests there, to see hovers. `VEYRA_DEBUG=1` writes a log to `%TEMP%\veyra.log`.

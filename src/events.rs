@@ -9,6 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use crate::lyrics::Line;
 use crate::media::{Art, MediaState};
+use crate::thumbs::Thumb;
 
 pub const WM_APP_EVENT: u32 = WM_APP + 1;
 
@@ -23,9 +24,14 @@ pub enum Event {
     AudioDevice,
     NetChanged,
     Caps,
-    DragEnter,
+    /// something droppable is over the island: true for text (-> Clipboard), false for files
+    DragEnter(bool),
     DragLeave,
+    /// a mouse button went down somewhere on the screen (see system::watch_clicks)
+    MouseDown,
     Drop(Vec<String>),
+    DropText(String),
+    Thumb(String, Option<Thumb>),
 }
 
 pub fn post(e: Event) {

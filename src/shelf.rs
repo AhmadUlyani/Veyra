@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::*;
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
@@ -16,6 +17,8 @@ use crate::util::wide;
 
 static DRAGGING_OUT: AtomicBool = AtomicBool::new(false);
 static DRAG_OK: AtomicBool = AtomicBool::new(false);
+/// the drag over the island carries text, not files (it goes to the Clipboard tab)
+static DRAG_TEXT: AtomicBool = AtomicBool::new(false);
 
 fn hdrop_fmt() -> FORMATETC {
     FORMATETC {
@@ -24,6 +27,41 @@ fn hdrop_fmt() -> FORMATETC {
         dwAspect: DVASPECT_CONTENT.0,
         lindex: -1,
         tymed: TYMED_HGLOBAL.0 as u32,
+    }
+}
+
+fn text_fmt() -> FORMATETC {
+    FORMATETC { cfFormat: CF_UNICODETEXT.0, ..hdrop_fmt() }
+}
+
+fn has_files(d: &IDataObject) -> bool {
+    unsafe { d.QueryGetData(&hdrop_fmt()) == S_OK }
+}
+
+fn has_text(d: &IDataObject) -> bool {
+    unsafe { d.QueryGetData(&text_fmt()) == S_OK }
+}
+
+/// Dragged text (from a browser, an editor, ...).
+fn get_text(d: &IDataObject) -> Option<String> {
+    unsafe {
+        let mut med = d.GetData(&text_fmt()).ok()?;
+        let hg = med.u.hGlobal;
+        let p = GlobalLock(hg) as *const u16;
+        let r = if p.is_null() {
+            None
+        } else {
+            let max = GlobalSize(hg) / 2;
+            let mut n = 0usize;
+            while n < max && *p.add(n) != 0 {
+                n += 1;
+            }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+            let _ = GlobalUnlock(hg);
+            Some(s)
+        };
+        ReleaseStgMedium(&mut med);
+        r.filter(|s| !s.trim().is_empty())
     }
 }
 
@@ -55,15 +93,24 @@ impl IDropTarget_Impl for DropTarget_Impl {
         _pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let ok = !DRAGGING_OUT.load(Ordering::Relaxed) && pdataobj.map(|d| !get_files(d).is_empty()).unwrap_or(false);
+        // files win over text: a file dragged from Explorer often carries its name as text too
+        let (files, text) = match pdataobj {
+            Some(d) if !DRAGGING_OUT.load(Ordering::Relaxed) => {
+                let f = has_files(d) && !get_files(d).is_empty();
+                (f, !f && has_text(d))
+            }
+            _ => (false, false),
+        };
+        let ok = files || text;
         DRAG_OK.store(ok, Ordering::Relaxed);
+        DRAG_TEXT.store(text, Ordering::Relaxed);
         unsafe {
             if !pdweffect.is_null() {
                 *pdweffect = if ok { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
             }
         }
         if ok {
-            post(Event::DragEnter);
+            post(Event::DragEnter(text));
         }
         Ok(())
     }
@@ -92,6 +139,16 @@ impl IDropTarget_Impl for DropTarget_Impl {
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
         let ok = DRAG_OK.swap(false, Ordering::Relaxed);
+        if ok && DRAG_TEXT.load(Ordering::Relaxed) {
+            let text = pdataobj.and_then(get_text);
+            unsafe {
+                if !pdweffect.is_null() {
+                    *pdweffect = if text.is_some() { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+                }
+            }
+            post(Event::DropText(text.unwrap_or_default()));
+            return Ok(());
+        }
         let files = if ok { pdataobj.map(get_files).unwrap_or_default() } else { Vec::new() };
         unsafe {
             if !pdweffect.is_null() {
