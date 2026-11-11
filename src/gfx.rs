@@ -635,7 +635,19 @@ impl Gfx {
     }
 
     fn draw_text(&self, s: &str, r: R, f: &IDWriteTextFormat, c: C) {
-        let c = self.legible(self.text_alpha(c));
+        self.draw_text_raw(s, r, f, self.text_alpha(c));
+    }
+
+    /// Text that stays exactly as faded as asked, whatever theme.conf `text_contrast` says
+    /// (dates of the neighbouring months in the calendar).
+    pub fn text_dim(&self, s: &str, r: R, size: f32, weight: u32, c: C, al: Al) {
+        if let Some(f) = self.fmt(size, weight, al, false, false) {
+            self.draw_text_raw(s, r, &f, c);
+        }
+    }
+
+    fn draw_text_raw(&self, s: &str, r: R, f: &IDWriteTextFormat, c: C) {
+        let c = self.legible(c);
         let w: Vec<u16> = s.encode_utf16().collect();
         unsafe {
             self.rt.DrawText(&w, f, &r.d2d(), self.b(c), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);

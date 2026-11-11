@@ -17,6 +17,7 @@ mod system;
 mod theme;
 mod thumbs;
 mod tray;
+mod update;
 mod util;
 mod vsync;
 
@@ -61,9 +62,24 @@ fn main() {
             return;
         }
 
+        // Started by the updater: the old copy is still closing, so wait for it to let go.
+        let after_update = args.len() >= 2 && args[1] == "--after-update";
+        let mut _mutex = CreateMutexW(None, BOOL::from(true), w!("Local\\Veyra.SingleInstance"));
+        if after_update {
+            for _ in 0..50 {
+                if GetLastError() != ERROR_ALREADY_EXISTS {
+                    break;
+                }
+                if let Ok(h) = &_mutex {
+                    let _ = CloseHandle(*h);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                _mutex = CreateMutexW(None, BOOL::from(true), w!("Local\\Veyra.SingleInstance"));
+            }
+        }
+        let already = GetLastError() == ERROR_ALREADY_EXISTS;
         // Already running (e.g. launched again from Windows Search): bring it back and open it.
-        let _mutex = CreateMutexW(None, BOOL::from(true), w!("Local\\Veyra.SingleInstance"));
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        if already {
             if let Ok(h) = FindWindowW(w!("VeyraIsland"), PCWSTR::null()) {
                 // we were launched by the user, so we may hand the foreground to the running copy
                 let mut pid = 0u32;
@@ -73,7 +89,7 @@ fn main() {
             }
             return;
         }
-
+        update::cleanup();
 
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
         let cls = w!("VeyraIsland");
@@ -121,6 +137,9 @@ fn main() {
         APP.with(|a| {
             if let Some(app) = a.borrow_mut().as_mut() {
                 app.start();
+                if after_update {
+                    app.updated();
+                }
             }
         });
 

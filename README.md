@@ -14,7 +14,7 @@ display's refresh rate (60/120/144/165 Hz…) by waiting for vertical blank. The
 | Focus | Pomodoro timer (default 25/5), countdown in the compact pill, soft chime when a phase ends. |
 | Water | Bottle size, daily goal, reminder interval. Reminders run 07:00–23:00 until you reach the goal; switch them off with the Reminders toggle. |
 | Shelf | Drag files onto the island to keep them, drag them back out into chats, emails or folders. Images show a small preview. Click a file to open it. With many files, scroll to slide through them. New screenshots (saved in Pictures\Screenshots by Win+PrtScn or the Snipping Tool) are added automatically; switch that off in the tray menu. |
-| Tasks | Add tasks with an optional time (− / + or the mouse wheel, ±15 / ±5 min). The island pings you when a task is due. |
+| Tasks | A month calendar next to the tasks of the day you pick. Days with tasks get a dot (red: overdue). Pick a day, type a task and set a time (− / + or the mouse wheel, ±15 / ±5 min; a later day starts at 09:00), then press Enter. Scroll over the calendar to change month, click the month name to jump back to today. Today also lists tasks without a time and unfinished ones from earlier days. Reminders come 1 day, 6 hours, 3 hours, 1 hour and 30 minutes before the deadline, and when it is due. While a full-screen app is in front they stay quiet and show once it is gone. |
 | Clipboard | The last 30 pieces of text you copied, newest first. Click one to copy it again (it keeps its place), or remove it with ✕. **Copy all** copies every entry at once, oldest first, one per line. Text dragged onto the island (from a browser or an editor) is added here too, without touching what is on the Windows clipboard. Kept in memory only, so the list is gone when Veyra closes, and copies that apps mark as private (password managers) are skipped. Text only, no images. |
 
 System notices: volume and brightness HUD, Caps Lock, keyboard language changes,
@@ -29,6 +29,7 @@ Both can be switched off in the menu, and stay off after that.
 * Click the pill to expand it (buttons react when the mouse button is released, so holding it down does nothing).
   It collapses by itself shortly after the mouse leaves it, or with `Esc` or a click outside; clicks inside
   the island never close it. It stays open while you type in a field or hold the mouse button.
+* A task or clipboard entry too long for its row ends in "…"; hold the mouse over it and the text slides to show the rest.
 * Right-click the island or the tray icon for **Hide / Show Veyra**, **Shrink to a line until hovered**,
   **Add screenshots to Shelf**, **Start with Windows** and **Quit**.
   Left-click the tray icon to bring a hidden island back.
@@ -38,6 +39,18 @@ Both can be switched off in the menu, and stay off after that.
 * Veyra adds itself to the Start menu on first run, so you can launch it from Windows Search.
   Launching it again while it runs (or is hidden) just opens the island.
 * Data is stored in `%APPDATA%\Veyra\data.json`.
+
+## Updates
+
+Veyra checks GitHub for a new release shortly after it starts and then every 6 hours. When there is one,
+a notice says so (not during full-screen apps): tap it to update. The menu (right-click the island or the tray icon)
+also has **Update to vX.Y.Z**, or **Check for updates** when nothing new was found yet.
+The update downloads `veyra.exe` from the latest release, checks it against the SHA-256 GitHub lists for the file,
+puts it in place of the running exe and restarts Veyra (settings and tasks stay). If Veyra's folder can't be written to,
+the notice opens the download page instead.
+
+Publishing a release: bump `version` in `Cargo.toml`, build, and create a GitHub release tagged `v<version>`
+(e.g. `v1.5.0`) with the built `veyra.exe` attached under exactly that name.
 
 ## UI colors
 
@@ -108,10 +121,12 @@ This runs `cargo build --release` and stamps the generated logo into `target\rel
 
 Or just double-click `rebuild.bat`: it closes the running Veyra, builds, and starts the new build.
 
-For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|clipboard|clipboardempty|tasksempty|toast|volume|focuspill|shelfimg|cliphover|cliphoverfull|caps|capsoff|tws|charging|copied|idle|line`
+For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|tasksday|taskremind|clipboard|clipboardempty|tasksempty|toast|volume|focuspill|shelfimg|cliphover|cliphoverfull|caps|capsoff|tws|charging|copied|idle|line`
 opens a specific view on start (demo mode never saves data). `VEYRA_DEMO=stress` keeps opening and closing the island
 to check for leaks (`VEYRA_STRESS=fetch|toggle|water`, `VEYRA_STRESS_MS`, `VEYRA_STRESS_N`). `VEYRA_MOUSE=x,y` pretends
 the cursor rests there, to see hovers. `VEYRA_DEBUG=1` writes a log to `%TEMP%\veyra.log`.
+`VEYRA_NO_UPDATE=1` skips the update check. `VEYRA_UPDATE_FROM=1.0.0` pretends to be that version; with
+`VEYRA_DEMO=update` it installs the latest release right away (run a copy in a spare folder: it replaces that exe).
 `veyra.exe --quit` asks a running Veyra to close (with its closing animation, saving data first).
 
 ## Tests

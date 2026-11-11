@@ -32,6 +32,10 @@ pub enum Event {
     Drop(Vec<String>),
     DropText(String),
     Thumb(String, Option<Thumb>),
+    /// latest release: Ok(Some) newer one, Ok(None) up to date, Err could not check; and whether the user asked
+    UpdateInfo(Result<Option<crate::update::Release>, ()>, bool),
+    /// the new exe is in place (Ok) or why not
+    UpdateDone(Result<(), String>),
 }
 
 pub fn post(e: Event) {

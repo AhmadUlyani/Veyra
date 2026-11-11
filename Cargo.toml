@@ -1,6 +1,6 @@
 [package]
 name = "veyra"
-version = "0.1.0"
+version = "1.5.0"
 edition = "2021"
 description = "Veyra - a lightweight Dynamic Island for Windows"
 
@@ -21,6 +21,8 @@ features = [
     "Web_Http",
     "Web_Http_Headers",
     "Networking_Connectivity",
+    "Security_Cryptography",
+    "Security_Cryptography_Core",
     "Win32_Foundation",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Globalization",

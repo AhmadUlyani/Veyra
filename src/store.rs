@@ -32,7 +32,10 @@ pub struct Task {
     pub text: String,
     pub due: Option<i64>,
     pub done: bool,
+    /// "due now" was shown
     pub notified: bool,
+    /// early reminders already shown (or skipped), one bit per entry of app::REMINDERS
+    pub alerts: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

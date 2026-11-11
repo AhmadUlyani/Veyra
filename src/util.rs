@@ -82,7 +82,7 @@ pub fn now() -> Now {
     Now { y, mo, d, h, mi, secs }
 }
 
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -90,6 +90,34 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146097 + doe - 719468
+}
+
+/// Day number (days since 1970-01-01) -> (year, month 1-12, day 1-31).
+pub fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// 0 = Monday ... 6 = Sunday (1970-01-01 was a Thursday).
+pub fn weekday(day: i64) -> i64 {
+    (day + 3).rem_euclid(7)
+}
+
+pub const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/// "Thu, 12 Nov"
+pub fn day_label(day: i64) -> String {
+    const WD: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    let (_, m, d) = civil_from_days(day);
+    format!("{}, {d} {}", WD[weekday(day) as usize], &MONTHS[(m - 1) as usize][..3])
 }
 
 pub fn hm(secs: i64) -> String {
@@ -171,4 +199,23 @@ pub fn heap_stats() -> String {
         }
     }
     format!("{n} heaps, allocated {:.2} MB, committed {:.2} MB", alloc as f64 / 1048576.0, commit as f64 / 1048576.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calendar_days() {
+        for z in [-800_000, -1, 0, 1, 20_760, 20_769, 60_000] {
+            let (y, m, d) = civil_from_days(z);
+            assert_eq!(days_from_civil(y, m, d), z);
+        }
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        // 2026-11-12 was a Thursday
+        let z = days_from_civil(2026, 11, 12);
+        assert_eq!(weekday(z), 3);
+        assert_eq!(day_label(z), "Thu, 12 Nov");
+        assert_eq!(civil_from_days(days_from_civil(2028, 2, 29)), (2028, 2, 29));
+    }
 }

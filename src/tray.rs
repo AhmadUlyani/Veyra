@@ -13,6 +13,7 @@ pub const CMD_HIDE: u32 = 12;
 pub const CMD_THEME: u32 = 13;
 pub const CMD_LINE: u32 = 14;
 pub const CMD_SHOTS: u32 = 15;
+pub const CMD_UPDATE: u32 = 16;
 
 /// Check marks shown in the menu.
 pub struct MenuState {
@@ -20,6 +21,9 @@ pub struct MenuState {
     pub hidden: bool,
     pub line_mode: bool,
     pub screenshots: bool,
+    /// a newer version that can be installed, or what the update item says while busy
+    pub update: Option<String>,
+    pub update_busy: bool,
 }
 
 fn nid(hwnd: HWND) -> NOTIFYICONDATAW {
@@ -62,6 +66,15 @@ pub fn menu(hwnd: HWND, st: &MenuState) -> u32 {
         let _ = AppendMenuW(m, check(st.screenshots), CMD_SHOTS as usize, w!("Add screenshots to Shelf"));
         let _ = AppendMenuW(m, check(st.autostart), CMD_AUTOSTART as usize, w!("Start with Windows"));
         let _ = AppendMenuW(m, MF_STRING, CMD_THEME as usize, w!("UI colors (theme.conf)..."));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
+        let upd = match (&st.update, st.update_busy) {
+            (_, true) => "Updating Veyra...".to_string(),
+            (Some(v), false) => format!("Update to v{v}"),
+            (None, false) => format!("Check for updates (v{})", crate::update::CURRENT),
+        };
+        let upd_w = wide(&upd);
+        let flags = if st.update_busy { MF_STRING | MF_GRAYED } else { MF_STRING };
+        let _ = AppendMenuW(m, flags, CMD_UPDATE as usize, PCWSTR(upd_w.as_ptr()));
         let _ = AppendMenuW(m, MF_STRING, CMD_QUIT as usize, w!("Quit Veyra"));
         let mut p = POINT::default();
         let _ = GetCursorPos(&mut p);

@@ -19,7 +19,7 @@ use crate::lyrics::{self, Line};
 use crate::media::{MediaCmd, MediaState};
 use crate::store::{self, Data, Task};
 use crate::util::*;
-use crate::{clip, shelf, shots, sound, system, theme, thumbs, tray};
+use crate::{clip, shelf, shots, sound, system, theme, thumbs, tray, update};
 
 // ------------------------------------------------------------------ style
 
@@ -79,6 +79,9 @@ mod ic {
     pub const DOC: char = '\u{E7C3}';
     pub const CHECK: char = '\u{E73E}';
     pub const CLIP: char = '\u{E77F}';
+    pub const DOWNLOAD: char = '\u{E896}';
+    pub const LEFT: char = '\u{E76B}';
+    pub const RIGHT: char = '\u{E76C}';
 }
 
 // ------------------------------------------------------------------ types
@@ -134,6 +137,46 @@ enum Live {
 // compact-island metrics (DIP)
 const PILL_H: f32 = 32.0;
 const TASK_SOON_MIN: i64 = 15;
+/// Early task reminders: how long before the deadline, and how the notice says it.
+/// Bit i of `Task::alerts` marks entry i as shown.
+pub const REMINDERS: [i64; 5] = [86400, 6 * 3600, 3 * 3600, 3600, 1800];
+
+/// "in 1 day", "in 6 hours", "in 40 minutes": how far off a deadline `left` seconds away is.
+fn left_label(left: i64) -> String {
+    let plural = |n: i64, w: &str| if n == 1 { format!("in 1 {w}") } else { format!("in {n} {w}s") };
+    if left >= 86400 - 1800 {
+        plural(((left + 43200) / 86400).max(1), "day")
+    } else if left >= 3600 - 300 {
+        plural(((left + 1800) / 3600).max(1), "hour")
+    } else {
+        plural(((left + 30) / 60).max(1), "minute")
+    }
+}
+/// A task put on a later day without a time is due at 09:00.
+const DEFAULT_TIME: i64 = 9 * 3600;
+
+/// The reminders that are already too late for a task due at `due` (a task added 2 hours
+/// before its deadline does not get the 1-day, 6-hour and 3-hour notices afterwards).
+pub fn passed_alerts(due: Option<i64>, now: i64) -> u8 {
+    let Some(d) = due else { return 0 };
+    let left = d - now;
+    REMINDERS.iter().enumerate().filter(|(_, s)| left <= **s).fold(0, |m, (i, _)| m | (1 << i))
+}
+
+/// Which early reminder to show now for a task due at `due`: the index of the closest one that
+/// has come up, if it was not shown yet, plus the new `alerts` bits. Overdue tasks get none
+/// (the "due now" notice covers them).
+pub fn reminder_due(due: i64, now: i64, alerts: u8) -> (Option<usize>, u8) {
+    let reached = passed_alerts(Some(due), now);
+    if due <= now {
+        return (None, alerts | reached);
+    }
+    if reached & !alerts == 0 {
+        return (None, alerts);
+    }
+    let closest = (0..REMINDERS.len()).rev().find(|i| reached & (1 << i) != 0);
+    (closest, alerts | reached)
+}
 /// Clock in the closed island: bold, sized so the digits sit about as tall as the artwork.
 const CLOCK_SIZE: f32 = 18.5;
 /// Width of the closed island when nothing is going on: just an empty black notch.
@@ -216,6 +259,10 @@ enum Act {
     TaskAdd,
     TaskToggle(u64),
     TaskDel(u64),
+    /// calendar: previous / next month, back to today, pick a day
+    CalMonth(i32),
+    CalToday,
+    CalDay(i64),
     ClipCopy(usize),
     ClipDel(usize),
     ClipClear,
@@ -240,8 +287,19 @@ const K_INFO: u8 = 0;
 const K_VOL: u8 = 1;
 const K_BRIGHT: u8 = 2;
 
+/// What tapping a notice does besides opening its tab.
+#[derive(Clone, Copy, PartialEq)]
+enum Tap {
+    None,
+    /// download and install the update it announces
+    Update,
+    /// open the releases page (the automatic update failed)
+    Releases,
+}
+
 struct Toast {
     id: u64,
+    tap: Tap,
     kind: u8,
     icon: TIcon,
     title: String,
@@ -414,6 +472,9 @@ pub struct App {
     surrogate: Option<u16>,
     task_due: Option<i64>,
     task_scroll: usize,
+    /// calendar: the month shown (year, 1-12) and the picked day (day number)
+    cal_month: (i64, i64),
+    sel_day: i64,
     /// clipboard history, newest first (memory only)
     clips: Vec<clip::Item>,
     clip_scroll: usize,
@@ -489,6 +550,19 @@ pub struct App {
     theme_mtime: Option<std::time::SystemTime>,
     /// how far the open (expanded) colors are faded in, 0..1
     open_k: f32,
+    /// a long line under the mouse is sliding (keeps frames coming), and which one since when
+    marquee_on: std::cell::Cell<bool>,
+    marquee_at: std::cell::Cell<Option<(u64, Instant)>>,
+    /// a newer release found on GitHub
+    upd_avail: Option<update::Release>,
+    /// checking or installing right now
+    upd_busy: bool,
+    /// the user asked: report the result even when there is nothing new
+    upd_manual: bool,
+    /// next automatic check
+    upd_next: Instant,
+    /// the version whose "Update available" notice was already shown
+    upd_shown: Option<String>,
 }
 
 fn monitor() -> (i32, i32, f32) {
@@ -583,6 +657,8 @@ impl App {
             surrogate: None,
             task_due: None,
             task_scroll: 0,
+            cal_month: (now().y, now().mo),
+            sel_day: now().day(),
             clips: Vec::new(),
             clip_scroll: 0,
             clip_copied: None,
@@ -632,6 +708,13 @@ impl App {
             hover_out: None,
             theme_mtime: theme::modified(),
             open_k: 0.0,
+            marquee_on: std::cell::Cell::new(false),
+            marquee_at: std::cell::Cell::new(None),
+            upd_avail: None,
+            upd_busy: false,
+            upd_manual: false,
+            upd_next: n + Duration::from_secs(20),
+            upd_shown: None,
         };
         clip::listen(hwnd);
         Ok(app)
@@ -767,12 +850,25 @@ impl App {
                 self.expand(Some(Tab::Media));
                 self.demo_switch = Some(Instant::now() + Duration::from_millis(1500));
             }
-            "tasks" => {
-                if self.data.tasks.is_empty() {
+            "tasks" | "tasksday" | "tasksfeb" => {
+                // always the samples (demo mode never saves, the real list stays as it is)
+                {
+                    self.data.tasks.clear();
                     let n = now().secs;
-                    self.data.tasks.push(Task { id: 1, text: "Send the weekly report".into(), due: Some(n + 3600), ..Default::default() });
+                    let day = n.div_euclid(86400) * 86400;
+                    self.data.tasks.push(Task { id: 1, text: "Send the weekly report to the whole team before Friday".into(), due: Some(n + 3600), ..Default::default() });
                     self.data.tasks.push(Task { id: 2, text: "Call the dentist".into(), due: Some(n - 600), ..Default::default() });
                     self.data.tasks.push(Task { id: 3, text: "Buy oat milk".into(), done: true, ..Default::default() });
+                    self.data.tasks.push(Task { id: 4, text: "Team meeting".into(), due: Some(day + 86400 + 10 * 3600), ..Default::default() });
+                    self.data.tasks.push(Task { id: 5, text: "Submit the assignment".into(), due: Some(day + 5 * 86400 + 23 * 3600 + 59 * 60), ..Default::default() });
+                    self.data.tasks.push(Task { id: 6, text: "Pay rent".into(), due: Some(day - 3 * 86400 + 12 * 3600), done: true, ..Default::default() });
+                }
+                if v == "tasksday" {
+                    self.select_day(now().day() + 5);
+                }
+                // February 2027 starts on a Monday: only 4 weeks of its own
+                if v == "tasksfeb" {
+                    self.select_day(days_from_civil(2027, 2, 10));
                 }
                 self.input = "Review pull request".into();
                 self.input_focus = true;
@@ -781,7 +877,7 @@ impl App {
             }
             "clipboard" => {
                 let n = now().secs;
-                let samples = ["Veyra", "Meeting moved to 3 pm,\nsame room", "https://lrclib.net/docs", "git commit -m \"fix: seam on light themes\""];
+                let samples = ["Veyra", "Meeting moved to 3 pm,\nsame room", "https://lrclib.net/docs/api/get-lyrics-by-track-signature-and-duration", "git commit -m \"fix: seam on light themes\""];
                 for (i, t) in samples.iter().enumerate() {
                     clip::push(&mut self.clips, t.to_string(), n - 420 * (3 - i as i64));
                 }
@@ -822,6 +918,12 @@ impl App {
                 self.expand(Some(Tab::Tasks));
                 self.edit = Some(Edit { field: Field::TaskTime, buf: "1h30".into(), fresh: false });
             }
+            // updater test: with VEYRA_UPDATE_FROM=<older version>, checks and installs right away
+            "update" => {
+                self.upd_busy = true;
+                update::check(true);
+            }
+            "taskremind" => self.toast(TIcon::G(ic::TASKS), "Task due in 1 hour", "Send the weekly report · 14:30", 600.0, TASK_C, Some(Tab::Tasks)),
             "taskpill" | "taskfocus" => {
                 self.demo_idle = true;
                 let n = now().secs;
@@ -946,6 +1048,7 @@ impl App {
         self.toast_seq += 1;
         self.toast = Some(Toast {
             id: self.toast_seq,
+            tap: Tap::None,
             kind: K_INFO,
             icon,
             title: title.into(),
@@ -975,6 +1078,7 @@ impl App {
         self.toast_seq += 1;
         self.toast = Some(Toast {
             id: self.toast_seq,
+            tap: Tap::None,
             kind,
             icon: TIcon::G(ch),
             title: String::new(),
@@ -1260,7 +1364,8 @@ impl App {
             && !lyr_moving
             && !shelf_moving
             && !open_moving
-            && hover_still;
+            && hover_still
+            && !self.marquee_on.get();
         if settled {
             self.sw.snap();
             self.sh.snap();
@@ -1376,7 +1481,12 @@ impl App {
             let sx = (wpx as f32 / s - strip_w) / 2.0;
             self.gfx.rect(R::new(sx, 0.0, strip_w, sh), C(0.0, 0.0, 0.0, 1.0 / 255.0));
         }
+        self.marquee_on.set(false);
         self.draw(&self.gfx, &mut ui, island);
+        if !self.marquee_on.get() {
+            // nothing long under the mouse any more: the next one starts from its beginning
+            self.marquee_at.set(None);
+        }
         self.gfx.end(self.hwnd, left, top, wpx, hpx);
         self.win = (left, top, wpx, hpx);
         self.isl_px = (
@@ -1617,7 +1727,7 @@ impl App {
             TIcon::Battery(f, ch) => draw_battery(g, r.cx() - 12.0, r.cy(), 22.0, 12.0, *f, *ch),
             TIcon::Drop => {
                 if let Some(geo) = g.drop_geo(R::new(r.cx() - 7.0, r.cy() - 9.5, 14.0, 19.0)) {
-                    g.fill_geo(&geo, g.legible(acc));
+                    g.fill_geo(&geo, g.legible(g.text_alpha(acc)));
                 }
             }
         }
@@ -1664,7 +1774,7 @@ impl App {
             TIcon::Battery(f, ch) => draw_battery(g, ir.cx() - 10.0, ir.cy(), 18.0, 10.0, *f, *ch),
             TIcon::Drop => {
                 if let Some(geo) = g.drop_geo(R::new(ir.cx() - 5.5, ir.cy() - 7.5, 11.0, 15.0)) {
-                    g.fill_geo(&geo, g.legible(t.accent));
+                    g.fill_geo(&geo, g.legible(g.text_alpha(t.accent)));
                 }
             }
         }
@@ -2213,7 +2323,7 @@ impl App {
             Field::Goal => w.goal_ml.to_string(),
             Field::Interval => w.interval_min.to_string(),
             Field::DrinkMl => String::new(),
-            Field::TaskTime => self.task_due.map(hm).unwrap_or_default(),
+            Field::TaskTime => self.draft_due().map(hm).unwrap_or_default(),
         };
         self.edit = Some(Edit { field: f, buf, fresh: true });
         self.input_focus = false;
@@ -2229,8 +2339,9 @@ impl App {
         let t = e.buf.trim().to_string();
         match e.field {
             Field::TaskTime => {
-                if let Some(v) = parse_due(&t, now().secs) {
+                if let Some(v) = parse_due_on(&t, now().secs, self.sel_day) {
                     self.task_due = v;
+                    self.follow_due();
                 }
             }
             f => {
@@ -2277,12 +2388,6 @@ impl App {
 
     fn selected_paths(&self) -> Vec<String> {
         self.data.shelf.iter().filter(|p| self.shelf_sel.contains(p)).cloned().collect()
-    }
-
-    fn sorted_tasks(&self) -> Vec<&Task> {
-        let mut v: Vec<&Task> = self.data.tasks.iter().collect();
-        v.sort_by_key(|t| (t.done, t.due.is_none(), t.due.unwrap_or(0), t.id));
-        v
     }
 
     fn draw_clipboard(&self, g: &Gfx, ui: &mut Ui, c: R) {
@@ -2340,7 +2445,8 @@ impl App {
             let hv = ui.hit(r, Act::ClipCopy(k));
             g.rrect(r, 9.0, if hv { WHITE.a(0.08) } else { WHITE.a(0.03) });
             let right = 64.0;
-            g.text(&clip::preview(&item.text), R::new(r.x + 12.0, r.y, r.w - 12.0 - right, r.h), 13.0, 400, WHITE, Al::L);
+            // keyed by position, with a high bit so it never matches a task id
+            self.marquee_text(g, (1 << 62) | k as u64, hv, &clip::preview(&item.text), R::new(r.x + 12.0, r.y, r.w - 12.0 - right, r.h), 13.0, 400, WHITE);
             let mark = if copied == Some(item.text.as_str()) {
                 Some("Copied")
             } else if dropped == Some(item.text.as_str()) {
@@ -2372,10 +2478,171 @@ impl App {
         }
     }
 
+    /// One line of text in `r`, cut with "…" as usual. Under the mouse, a line too long to fit
+    /// slides left until its end shows, waits, and slides back. Returns how far it is slid.
+    #[allow(clippy::too_many_arguments)]
+    fn marquee_text(&self, g: &Gfx, key: u64, hover: bool, s: &str, r: R, size: f32, weight: u32, c: C) -> f32 {
+        let tw = g.measure(s, size, weight);
+        let over = tw - r.w;
+        if !hover || over <= 1.0 {
+            g.text(s, r, size, weight, c, Al::L);
+            return 0.0;
+        }
+        let now = Instant::now();
+        let start = match self.marquee_at.get() {
+            Some((k, t)) if k == key => t,
+            _ => {
+                self.marquee_at.set(Some((key, now)));
+                now
+            }
+        };
+        self.marquee_on.set(true);
+        // a short wait first (just passing by doesn't start it), ~45 px a second, a pause at the end
+        const WAIT: f32 = 0.6;
+        const HOLD: f32 = 1.4;
+        let dist = over + 8.0;
+        let go = (dist / 45.0).max(0.5);
+        let t = now.duration_since(start).as_secs_f32() % (WAIT + go + HOLD + go);
+        let f = if t < WAIT {
+            0.0
+        } else if t < WAIT + go {
+            smooth((t - WAIT) / go)
+        } else if t < WAIT + go + HOLD {
+            1.0
+        } else {
+            1.0 - smooth((t - WAIT - go - HOLD) / go)
+        };
+        if f <= 0.0 {
+            g.text(s, r, size, weight, c, Al::L);
+            return 0.0;
+        }
+        let off = dist * f;
+        g.push_rr(r, 0.0, 1.0);
+        g.text(s, R::new(r.x - off, r.y, tw + 20.0, r.h), size, weight, c, Al::L);
+        g.pop();
+        off
+    }
+
+    /// Tasks shown for the picked day: the ones due that day; on today also the ones without
+    /// a time and the unfinished ones from earlier days.
+    fn day_tasks(&self) -> Vec<&Task> {
+        let today = now().day();
+        let sel = self.sel_day;
+        let mut v: Vec<&Task> = self
+            .data
+            .tasks
+            .iter()
+            .filter(|t| match t.due {
+                Some(d) => {
+                    let dd = d.div_euclid(86400);
+                    dd == sel || (sel == today && dd < today && !t.done)
+                }
+                None => sel == today,
+            })
+            .collect();
+        v.sort_by_key(|t| (t.done, t.due.is_none(), t.due.unwrap_or(0), t.id));
+        v
+    }
+
+    fn draw_calendar(&self, g: &Gfx, ui: &mut Ui, r: R, today: i64, now_s: i64) {
+        let (y, m) = self.cal_month;
+        // header: month (click: back to today) and the arrows
+        let title = format!("{} {}", MONTHS[(m - 1).clamp(0, 11) as usize], y);
+        let tw = g.measure(&title, 12.5, 600);
+        let tr = R::new(r.x, r.y, tw + 10.0, 22.0);
+        let th = ui.hit(tr, Act::CalToday);
+        g.text(&title, R::new(r.x + 4.0, r.y, tw + 4.0, 22.0), 12.5, 600, if th { TASK_C } else { WHITE }, Al::L);
+        let nr = R::new(r.right() - 22.0, r.y, 22.0, 22.0);
+        let pr = R::new(nr.x - 24.0, r.y, 22.0, 22.0);
+        icon_btn(g, ui, pr, ic::LEFT, 9.0, T2, Act::CalMonth(-1), false);
+        icon_btn(g, ui, nr, ic::RIGHT, 9.0, T2, Act::CalMonth(1), false);
+        // weekdays, Monday first
+        let cw = r.w / 7.0;
+        let wy = r.y + 25.0;
+        for (i, d) in ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].iter().enumerate() {
+            g.text(d, R::new(r.x + i as f32 * cw, wy, cw, 12.0), 9.5, 600, T3, Al::C);
+        }
+        // which days have tasks: (unfinished, overdue)
+        let mut marks: HashMap<i64, (bool, bool)> = HashMap::new();
+        for t in &self.data.tasks {
+            if let Some(d) = t.due {
+                let e = marks.entry(d.div_euclid(86400)).or_insert((false, false));
+                if !t.done {
+                    e.0 = true;
+                    e.1 |= d <= now_s;
+                }
+            }
+        }
+        // the days: always 6 full rows (42 days), the gaps filled with the days before and
+        // after, so every month looks the same and the grid never jumps
+        let first = days_from_civil(y, m, 1);
+        let start = first - weekday(first);
+        let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+        let next = days_from_civil(ny, nm, 1);
+        let gy = wy + 14.0;
+        let rh = ((r.bottom() - gy) / 6.0).min(30.0);
+        let rad = (rh / 2.0 - 1.0).min(cw / 2.0 - 1.5);
+        for k in 0..42 {
+            let day = start + k;
+            let cell = R::new(r.x + (k % 7) as f32 * cw, gy + (k / 7) as f32 * rh, cw, rh);
+            let (cx, cy) = (cell.cx(), cell.cy());
+            let hv = ui.hit(cell, Act::CalDay(day));
+            let sel = day == self.sel_day;
+            let in_month = day >= first && day < next;
+            if sel {
+                g.circle(cx, cy, rad, accent_btn(g, TASK_C));
+            } else if hv {
+                g.circle(cx, cy, rad, surf(g, true));
+            }
+            if day == today && !sel {
+                g.circle_stroke(cx, cy, rad - 0.6, TASK_C.a(0.85), 1.2);
+            }
+            let fg = if sel {
+                accent_fg(g)
+            } else if day == today {
+                TASK_C
+            } else if !in_month {
+                WHITE.a(0.22)
+            } else if day < today {
+                T2
+            } else {
+                WHITE
+            };
+            let (_, _, dn) = civil_from_days(day);
+            let bold = if sel || day == today { 700 } else { 500 };
+            let nr = R::new(cell.x, cy - 9.0, cell.w, 14.0);
+            if !in_month && !sel && day != today {
+                // neighbouring months stay clearly fainter (not lifted by text_contrast)
+                g.text_dim(&dn.to_string(), nr, 11.0, 500, fg, Al::C);
+            } else {
+                g.text(&dn.to_string(), nr, 11.0, bold, fg, Al::C);
+            }
+            if let Some(&(open, over)) = marks.get(&day) {
+                let col = if sel {
+                    accent_fg(g)
+                } else if over {
+                    RED
+                } else if open {
+                    TASK_C
+                } else {
+                    T3
+                };
+                g.circle(cx, cy + rad - 3.6, 1.6, if in_month || sel { col } else { col.a(col.3 * 0.5) });
+            }
+        }
+    }
+
     fn draw_tasks(&self, g: &Gfx, ui: &mut Ui, c: R) {
         let n = now();
-        // input row
-        let field = R::new(c.x, c.y, c.w - 178.0, 32.0);
+        let today = n.day();
+        // calendar on the left, the picked day on the right
+        let cal = R::new(c.x, c.y, 196.0, c.h);
+        self.draw_calendar(g, ui, cal, today, n.secs);
+        g.line(cal.right() + 10.0, c.y + 2.0, cal.right() + 10.0, c.bottom() - 2.0, 1.0, WHITE.a(0.1));
+        let c = R::new(cal.right() + 20.0, c.y, c.right() - cal.right() - 20.0, c.h);
+
+        // input row: the text and the add button
+        let field = R::new(c.x, c.y, c.w - 32.0 - 6.0, 30.0);
         let hv = ui.hit(field, Act::TaskField);
         g.rrect(field, 10.0, if self.input_focus { WHITE.a(0.12) } else { surf(g, hv) });
         if self.input_focus {
@@ -2395,38 +2662,64 @@ impl App {
             }
             g.pop();
         }
-        // time chip
-        let tr = R::new(field.right() + 8.0, c.y, 128.0, 32.0);
-        g.rrect(tr, 10.0, surf(g, false));
-        let mr = R::new(tr.x, tr.y, 30.0, 32.0);
-        let pr = R::new(tr.right() - 30.0, tr.y, 30.0, 32.0);
-        let mid = R::new(tr.x + 30.0, tr.y, tr.w - 60.0, 32.0);
-        let mh = ui.hit(mr, Act::TaskTime(-900));
-        let ph = ui.hit(pr, Act::TaskTime(900));
-        let th = ui.hit(mid, Act::Edit(Field::TaskTime));
-        g.icon(ic::MINUS, mr, 10.0, if mh { WHITE } else { T2 });
-        g.icon(ic::ADD, pr, 10.0, if ph { WHITE } else { T2 });
-        match (self.edit_of(Field::TaskTime), self.task_due) {
-            (Some(e), _) => value_box(g, mid, "", Some(e), false, 12.5),
-            (None, Some(d)) => g.text(&due_label(d, n.day()), mid, 12.5, 600, if th { WHITE } else { TASK_C }, Al::C),
-            (None, None) => g.text("No time", mid, 12.0, 500, if th { WHITE } else { T3 }, Al::C),
-        }
-        let ar = R::new(c.right() - 34.0, c.y, 34.0, 32.0);
+        let ar = R::new(c.right() - 32.0, c.y, 32.0, 30.0);
         let ah = ui.hit(ar, Act::TaskAdd);
         let ac = accent_btn(g, TASK_C);
         g.rrect(ar, 10.0, if ah { ac } else { ac.a(0.85) });
-        g.icon(ic::ADD, ar, 13.0, accent_fg(g));
+        g.icon(ic::ADD, ar, 12.0, accent_fg(g));
+
+        // second row: the picked day, and the time a new task gets on it
+        let hy = c.y + 36.0;
+        let tr = R::new(c.right() - 96.0, hy, 96.0, 26.0);
+        g.rrect(tr, 9.0, surf(g, false));
+        let mr = R::new(tr.x, tr.y, 24.0, 26.0);
+        let pr = R::new(tr.right() - 24.0, tr.y, 24.0, 26.0);
+        let mid = R::new(tr.x + 24.0, tr.y, tr.w - 48.0, 26.0);
+        let mh = ui.hit(mr, Act::TaskTime(-900));
+        let ph = ui.hit(pr, Act::TaskTime(900));
+        let th = ui.hit(mid, Act::Edit(Field::TaskTime));
+        g.icon(ic::MINUS, mr, 9.0, if mh { WHITE } else { T2 });
+        g.icon(ic::ADD, pr, 9.0, if ph { WHITE } else { T2 });
+        match (self.edit_of(Field::TaskTime), self.draft_due()) {
+            (Some(e), _) => value_box(g, mid, "", Some(e), false, 11.5),
+            (None, Some(d)) => {
+                let label = if d.div_euclid(86400) == self.sel_day { hm(d) } else { due_label(d, today) };
+                g.text(&label, mid, 11.5, 600, if th { WHITE } else { TASK_C }, Al::C);
+            }
+            (None, None) => g.text("No time", mid, 11.0, 500, if th { WHITE } else { T3 }, Al::C),
+        }
+        let sel = self.sel_day;
+        let head = match sel - today {
+            0 => format!("Today · {}", day_label(sel)),
+            1 => format!("Tomorrow · {}", day_label(sel)),
+            -1 => format!("Yesterday · {}", day_label(sel)),
+            _ => {
+                let (y, _, _) = civil_from_days(sel);
+                if y == n.y {
+                    day_label(sel)
+                } else {
+                    format!("{} {y}", day_label(sel))
+                }
+            }
+        };
+        let tasks = self.day_tasks();
+        g.text(&head, R::new(c.x + 2.0, hy, tr.x - c.x - 8.0, 26.0), 11.5, 600, T2, Al::L);
 
         // list
-        let tasks = self.sorted_tasks();
-        let ly = c.y + 42.0;
-        let rh = 30.0;
+        let ly = c.y + 68.0;
+        let rh = 27.0;
         let rows = ((c.bottom() - ly) / rh).floor().max(1.0) as usize;
         if tasks.is_empty() {
-            // title 22 + subtitle 18, centered in the space under the input row
             let y = ly + ((c.bottom() - ly - 40.0) / 2.0).max(0.0);
-            g.text("No tasks yet", R::new(c.x, y, c.w, 22.0), 14.0, 600, T2, Al::C);
-            g.text("Type a task, set a time (type 14:30 or 30m, or use − / +), press Enter.", R::new(c.x, y + 22.0, c.w, 18.0), 11.5, 400, T3, Al::C);
+            let (title, hint) = if sel < today {
+                ("Nothing was planned", "Pick today or a later day to add tasks.")
+            } else if sel == today {
+                ("No tasks for today", "Type a task, pick a time, press Enter.")
+            } else {
+                ("Nothing planned yet", "Tasks added now go on this day.")
+            };
+            g.text(title, R::new(c.x, y, c.w, 22.0), 13.5, 600, T2, Al::C);
+            g.text(hint, R::new(c.x, y + 22.0, c.w, 18.0), 11.0, 400, T3, Al::C);
             return;
         }
         let start = self.task_scroll.min(tasks.len().saturating_sub(rows));
@@ -2440,22 +2733,17 @@ impl App {
             let ch = ui.hit(cb, Act::TaskToggle(t.id));
             g.icon(if t.done { ic::BOX_ON } else { ic::BOX }, cb, 15.0, if t.done { TASK_C } else if ch { WHITE } else { T2 });
             let overdue = !t.done && t.due.map(|d| d <= n.secs).unwrap_or(false);
-            let due_w = if t.due.is_some() { 86.0 } else { 0.0 };
+            let label = t.due.map(|d| if d.div_euclid(86400) == sel { hm(d) } else { due_label(d, today) });
+            let due_w = label.as_ref().map(|l| g.measure(l, 12.0, 600) + 6.0).unwrap_or(0.0);
             let txt = R::new(r.x + 36.0, r.y, r.w - 36.0 - due_w - 30.0, r.h);
-            g.text(&t.text, txt, 13.0, 400, if t.done { T3 } else { WHITE }, Al::L);
+            let off = self.marquee_text(g, t.id, hv, &t.text, txt, 13.0, 400, if t.done { T3 } else { WHITE });
             if t.done {
-                let w = g.measure(&t.text, 13.0, 400).min(txt.w);
-                g.line(txt.x, r.cy(), txt.x + w, r.cy(), 1.2, T3);
+                let tw = g.measure(&t.text, 13.0, 400);
+                let (x0, x1) = ((txt.x - off).max(txt.x), (txt.x - off + tw).min(txt.right()));
+                g.line(x0, r.cy(), x1, r.cy(), 1.2, T3);
             }
-            if let Some(d) = t.due {
-                g.text(
-                    &due_label(d, n.day()),
-                    R::new(r.right() - due_w - 30.0, r.y, due_w, r.h),
-                    12.0,
-                    600,
-                    if t.done { T3 } else if overdue { RED } else { TASK_C },
-                    Al::R,
-                );
+            if let Some(l) = &label {
+                g.text(l, R::new(r.right() - due_w - 28.0, r.y, due_w, r.h), 12.0, 600, if t.done { T3 } else if overdue { RED } else { TASK_C }, Al::R);
             }
             if hv {
                 let xr = R::new(r.right() - 26.0, r.y + 3.0, 24.0, r.h - 6.0);
@@ -2498,7 +2786,7 @@ impl App {
                 self.commit_edit();
             }
         }
-        if !matches!(a, Act::TaskField | Act::TaskTime(_) | Act::Edit(Field::TaskTime) | Act::TaskAdd) {
+        if !matches!(a, Act::TaskField | Act::TaskTime(_) | Act::Edit(Field::TaskTime) | Act::TaskAdd | Act::CalMonth(_) | Act::CalToday | Act::CalDay(_)) {
             self.input_focus = false;
         }
         match a {
@@ -2690,10 +2978,15 @@ impl App {
                 self.data.tasks.retain(|t| t.id != id);
                 self.dirty = true;
             }
+            Act::CalMonth(d) => self.shift_month(d),
+            Act::CalToday => self.select_day(now().day()),
+            Act::CalDay(day) => self.select_day(day),
             Act::Toast => {
                 if let Some(t) = self.toast.take() {
-                    if let Some(tab) = t.tab {
-                        self.expand(Some(tab));
+                    if !self.toast_tapped(t.tap) {
+                        if let Some(tab) = t.tab {
+                            self.expand(Some(tab));
+                        }
                     }
                 }
             }
@@ -2710,12 +3003,57 @@ impl App {
     fn adjust_due(&mut self, d: i64) {
         let n = now().secs;
         let round_up = |s: i64, step: i64| (s / step + 1) * step;
-        let base = self.task_due.unwrap_or_else(|| round_up(n + 600, 900));
-        let mut v = if self.task_due.is_some() { base + d } else { base };
+        let mut v = match self.draft_due() {
+            Some(t) => t + d,
+            None => round_up(n + 600, 900),
+        };
         if v <= n {
             v = round_up(n, 300);
         }
         self.task_due = Some(v);
+        self.follow_due();
+    }
+
+    /// The time a new task gets: the one picked, or 09:00 on a later day picked in the calendar.
+    fn draft_due(&self) -> Option<i64> {
+        match self.task_due {
+            Some(t) => Some(t),
+            None if self.sel_day > now().day() => Some(self.sel_day * 86400 + DEFAULT_TIME),
+            None => None,
+        }
+    }
+
+    /// The picked time moved to another day (+ past midnight, "30m" late in the evening):
+    /// the calendar goes along.
+    fn follow_due(&mut self) {
+        if let Some(t) = self.task_due {
+            let day = t.div_euclid(86400);
+            if day != self.sel_day {
+                self.sel_day = day;
+                let (y, m, _) = civil_from_days(day);
+                self.cal_month = (y, m);
+                self.task_scroll = 0;
+            }
+        }
+    }
+
+    /// Pick a day in the calendar. A time already picked keeps its hour on the new day.
+    fn select_day(&mut self, day: i64) {
+        let n = now().secs;
+        self.sel_day = day;
+        let (y, m, _) = civil_from_days(day);
+        self.cal_month = (y, m);
+        self.task_scroll = 0;
+        if let Some(t) = self.task_due {
+            let v = day * 86400 + t.rem_euclid(86400);
+            self.task_due = (v > n).then_some(v);
+        }
+    }
+
+    fn shift_month(&mut self, d: i32) {
+        let (y, m) = self.cal_month;
+        let k = y * 12 + (m - 1) + d as i64;
+        self.cal_month = (k.div_euclid(12), k.rem_euclid(12) + 1);
     }
 
     fn add_task(&mut self) {
@@ -2724,10 +3062,22 @@ impl App {
             self.input_focus = true;
             return;
         }
+        let n = now();
+        let due = self.draft_due();
         self.data.next_id += 1;
-        self.data.tasks.push(Task { id: self.data.next_id, text, due: self.task_due, done: false, notified: false });
+        self.data.tasks.push(Task {
+            id: self.data.next_id,
+            text,
+            due,
+            done: false,
+            notified: false,
+            alerts: passed_alerts(due, n.secs),
+        });
         self.input.clear();
-        self.task_due = None;
+        // on a later day the time stays, for adding more tasks to that day
+        if self.sel_day <= n.day() {
+            self.task_due = None;
+        }
         self.dirty = true;
     }
 
@@ -2974,6 +3324,8 @@ impl App {
     }
 
     fn per_second(&mut self) {
+        // hide during full-screen apps / presentations; reminders wait until it is back
+        self.apply_visibility();
         let t = now();
         let today = t.date();
         if self.data.water.date != today {
@@ -2990,34 +3342,26 @@ impl App {
         // water reminder (07:00–22:59)
         let w = &self.data.water;
         let iv = Duration::from_secs(w.interval_min as u64 * 60);
-        if w.remind && (7..23).contains(&t.h) && w.total() < w.goal_ml && self.water_mark.elapsed() >= iv {
+        if w.remind && !self.hidden && (7..23).contains(&t.h) && w.total() < w.goal_ml && self.water_mark.elapsed() >= iv {
             self.water_mark = Instant::now();
             let msg = format!("{} / {} ml today · tap to log", w.total(), w.goal_ml);
             sound::chime();
             self.toast(TIcon::Drop, "Time to drink some water", &msg, 10.0, WATER_C, Some(Tab::Water));
         }
 
-        // task reminders
-        let mut due: Vec<String> = Vec::new();
-        for task in self.data.tasks.iter_mut() {
-            if !task.done && !task.notified {
-                if let Some(d) = task.due {
-                    if d <= t.secs {
-                        task.notified = true;
-                        due.push(task.text.clone());
-                    }
-                }
-            }
-        }
-        if !due.is_empty() {
-            self.dirty = true;
-            sound::chime();
-            let sub = if due.len() == 1 { due[0].clone() } else { format!("{} and {} more", due[0], due.len() - 1) };
-            self.toast(TIcon::G(ic::TASKS), "Task due now", &sub, 12.0, TASK_C, Some(Tab::Tasks));
+        // task reminders: 1 day, 6 h, 3 h, 1 h and 30 min before, and when due. Not while
+        // hidden (full-screen game, video or presentation): they come once it is back.
+        if !self.hidden {
+            self.task_reminders(t.secs);
         }
 
-        // hide during full-screen apps / presentations
-        self.apply_visibility();
+        // updates: a quiet check now and then, the offer once nothing is in the way
+        if !self.demo && !self.upd_busy && Instant::now() >= self.upd_next && std::env::var_os("VEYRA_NO_UPDATE").is_none() {
+            self.upd_next = Instant::now() + Duration::from_secs(6 * 3600);
+            self.upd_busy = true;
+            update::check(false);
+        }
+        self.offer_update();
 
         // theme.json edited: apply the new colors right away
         let m = theme::modified();
@@ -3028,6 +3372,49 @@ impl App {
 
         if self.dirty {
             self.save_now();
+        }
+    }
+
+    fn task_reminders(&mut self, now_s: i64) {
+        let today = now_s.div_euclid(86400);
+        let mut due: Vec<String> = Vec::new();
+        // (task text, deadline)
+        let mut soon: Vec<(String, i64)> = Vec::new();
+        for task in self.data.tasks.iter_mut() {
+            let Some(d) = task.due else { continue };
+            if task.done {
+                continue;
+            }
+            let (which, bits) = reminder_due(d, now_s, task.alerts);
+            if bits != task.alerts {
+                task.alerts = bits;
+                self.dirty = true;
+            }
+            if which.is_some() {
+                soon.push((task.text.clone(), d));
+            }
+            if !task.notified && d <= now_s {
+                task.notified = true;
+                self.dirty = true;
+                due.push(task.text.clone());
+            }
+        }
+        if !due.is_empty() {
+            sound::chime();
+            let sub = if due.len() == 1 { due[0].clone() } else { format!("{} and {} more", due[0], due.len() - 1) };
+            self.toast(TIcon::G(ic::TASKS), "Task due now", &sub, 12.0, TASK_C, Some(Tab::Tasks));
+        } else if !soon.is_empty() {
+            // the most pressing one leads
+            soon.sort_by_key(|(_, d)| *d);
+            let (text, d) = &soon[0];
+            let when = if d.div_euclid(86400) == today { hm(*d) } else { due_label(*d, today) };
+            let (title, sub) = if soon.len() == 1 {
+                (format!("Task due {}", left_label(d - now_s)), format!("{text} · {when}"))
+            } else {
+                (format!("{} tasks due soon", soon.len()), format!("{text} · {when} and {} more", soon.len() - 1))
+            };
+            sound::chime();
+            self.toast(TIcon::G(ic::TASKS), &title, &sub, 12.0, TASK_C, Some(Tab::Tasks));
         }
     }
 
@@ -3163,6 +3550,8 @@ impl App {
                         self.collapse_at = Some(Instant::now() + Duration::from_millis(2500));
                     }
                 }
+                Event::UpdateInfo(r, manual) => self.on_update_info(r, manual),
+                Event::UpdateDone(r) => self.on_update_done(r),
                 Event::Thumb(p, t) => {
                     // only while the file is still on the Shelf (it may be gone by now)
                     if let Some(slot) = self.thumbs.get_mut(&p) {
@@ -3351,9 +3740,11 @@ impl App {
                 Some(Act::VolBar(r)) => self.act(Act::VolBar(r), p.0),
                 Some(Act::Tab(t)) => self.expand(Some(t)),
                 Some(Act::Toast) => {
-                    let tab = self.toast.as_ref().and_then(|t| t.tab);
+                    let (tab, tap) = self.toast.as_ref().map(|t| (t.tab, t.tap)).unwrap_or((None, Tap::None));
                     self.toast = None;
-                    self.expand(tab);
+                    if !self.toast_tapped(tap) {
+                        self.expand(tab);
+                    }
                 }
                 _ => self.expand(None),
             }
@@ -3416,6 +3807,7 @@ impl App {
             return;
         }
         match (self.tab, hit) {
+            (Tab::Tasks, Some(Act::CalDay(_) | Act::CalMonth(_) | Act::CalToday)) => self.shift_month(-steps),
             (Tab::Tasks, Some(Act::TaskTime(_))) | (Tab::Tasks, Some(Act::Edit(Field::TaskTime))) => {
                 if self.task_due.is_none() {
                     self.adjust_due(0);
@@ -3558,7 +3950,138 @@ impl App {
             hidden: self.user_hidden,
             line_mode: self.data.settings.line_mode,
             screenshots: self.data.settings.screenshots,
+            update: self.upd_avail.as_ref().map(|r| r.version.clone()),
+            update_busy: self.upd_busy,
         }
+    }
+
+    // -------------------------------------------------------------- updates
+
+    /// A notice that does something of its own when tapped. Returns true if it did.
+    fn toast_tapped(&mut self, tap: Tap) -> bool {
+        match tap {
+            Tap::None => false,
+            Tap::Update => {
+                self.start_update();
+                true
+            }
+            Tap::Releases => {
+                update::open_releases_page();
+                true
+            }
+        }
+    }
+
+    fn notice(&mut self, icon: TIcon, title: &str, sub: &str, secs: f32, accent: C, tap: Tap) {
+        self.toast(icon, title, sub, secs, accent, None);
+        if let Some(t) = &mut self.toast {
+            t.tap = tap;
+        }
+    }
+
+    /// Tray item: check now, or install the update already found.
+    fn update_cmd(&mut self) {
+        if self.upd_busy {
+            return;
+        }
+        if self.upd_avail.is_some() {
+            self.start_update();
+        } else {
+            self.upd_busy = true;
+            self.upd_manual = true;
+            self.upd_next = Instant::now() + Duration::from_secs(6 * 3600);
+            update::check(true);
+            self.notice(TIcon::G(ic::DOWNLOAD), "Checking for updates…", "", 4.0, WHITE, Tap::None);
+        }
+    }
+
+    fn start_update(&mut self) {
+        let Some(r) = self.upd_avail.clone() else { return };
+        if self.upd_busy {
+            return;
+        }
+        self.upd_busy = true;
+        if self.expanded {
+            self.collapse();
+        }
+        let sub = format!("Downloading v{} · Veyra restarts by itself", r.version);
+        update::install(r);
+        self.notice(TIcon::G(ic::DOWNLOAD), "Updating Veyra…", &sub, 120.0, GREEN, Tap::None);
+    }
+
+    fn on_update_info(&mut self, r: Result<Option<update::Release>, ()>, manual: bool) {
+        self.upd_busy = false;
+        let manual = manual || std::mem::take(&mut self.upd_manual);
+        match r {
+            Ok(Some(rel)) => {
+                dbg_log(&format!("update: v{} available", rel.version));
+                self.upd_avail = Some(rel);
+                if self.demo && std::env::var("VEYRA_DEMO").as_deref() == Ok("update") {
+                    self.start_update();
+                    return;
+                }
+                if manual {
+                    // asked for it: offer it again even if it was offered before
+                    self.upd_shown = None;
+                    self.toast = None;
+                }
+                self.offer_update();
+            }
+            Ok(None) => {
+                self.upd_avail = None;
+                if manual {
+                    self.notice(TIcon::G(ic::CHECK), "Veyra is up to date", &format!("Version {}", update::CURRENT), 3.0, GREEN, Tap::None);
+                }
+            }
+            Err(()) => {
+                dbg_log("update: check failed");
+                if manual {
+                    self.notice(TIcon::G(ic::WIFI), "Couldn't check for updates", "No connection to GitHub", 4.0, RED, Tap::None);
+                }
+            }
+        }
+    }
+
+    /// "Update available" once per version, and not while hidden (full screen) or open.
+    fn offer_update(&mut self) {
+        let Some(r) = &self.upd_avail else { return };
+        if self.upd_busy || self.hidden || self.expanded || self.upd_shown.as_deref() == Some(r.version.as_str()) {
+            return;
+        }
+        // don't push away another notice; per_second tries again
+        if self.toast.is_some() {
+            return;
+        }
+        let v = r.version.clone();
+        self.upd_shown = Some(v.clone());
+        self.notice(TIcon::G(ic::DOWNLOAD), &format!("Veyra {v} is available"), "Tap to update · takes a few seconds", 12.0, GREEN, Tap::Update);
+    }
+
+    fn on_update_done(&mut self, r: Result<(), String>) {
+        match r {
+            Ok(()) => {
+                dbg_log("update: installed, restarting");
+                self.save_now();
+                if update::relaunch() {
+                    tray::remove(self.hwnd);
+                    crate::quit_now();
+                }
+                // could not start the new copy: it runs from the next launch on
+                self.upd_busy = false;
+                self.upd_avail = None;
+                self.notice(TIcon::G(ic::CHECK), "Update installed", "Restart Veyra to use the new version", 8.0, GREEN, Tap::None);
+            }
+            Err(e) => {
+                dbg_log(&format!("update: failed: {e}"));
+                self.upd_busy = false;
+                self.notice(TIcon::G(ic::DOWNLOAD), "Update failed", &format!("{e} · tap to open the download page"), 10.0, RED, Tap::Releases);
+            }
+        }
+    }
+
+    /// Started by the updater (`--after-update`).
+    pub fn updated(&mut self) {
+        self.notice(TIcon::G(ic::CHECK), "Veyra updated", &format!("You're on version {}", update::CURRENT), 5.0, GREEN, Tap::None);
     }
 
     /// The clipboard changed. Reading it right away would hold it open while the copying app
@@ -3599,7 +4122,7 @@ impl App {
 
     /// A small pill. Not over the open panel, and not over a reminder that can be tapped.
     fn copied_notice(&mut self) {
-        let reminder = self.toast.as_ref().map(|t| t.tab.is_some()).unwrap_or(false);
+        let reminder = self.toast.as_ref().map(|t| t.tab.is_some() || t.tap != Tap::None).unwrap_or(false);
         if !self.expanded && !reminder && !self.demo {
             self.toast(TIcon::G(ic::CLIP), "Text copied", "", 1.4, WHITE, None);
         }
@@ -3624,6 +4147,8 @@ impl App {
         } else if cmd == tray::CMD_AUTOSTART {
             self.autostart = !self.autostart;
             tray::set_autostart(self.autostart);
+        } else if cmd == tray::CMD_UPDATE {
+            self.update_cmd();
         } else if cmd == tray::CMD_HIDE {
             if self.user_hidden {
                 self.user_hidden = false;
@@ -3730,7 +4255,7 @@ fn draw_tab_icon(g: &Gfx, t: Tab, r: R, col: C) {
         Tab::Focus => g.icon(ic::TIMER, r, 14.0, col),
         Tab::Water => {
             if let Some(geo) = g.drop_geo(R::new(r.cx() - 5.5, r.cy() - 7.5, 11.0, 15.0)) {
-                g.fill_geo(&geo, g.legible(g.icon_color(col)));
+                g.fill_geo(&geo, g.legible(g.text_alpha(g.icon_color(col))));
             }
         }
         Tab::Shelf => g.icon(ic::FOLDER, r, 14.0, col),
@@ -3902,7 +4427,13 @@ fn parse_amount(s: &str, volume: bool) -> Option<u32> {
 
 /// Task time: "" clears it; "14:30", "14.30", "1430", "9" set a clock time (tomorrow if
 /// already past); "30m", "2h", "1h30" are relative to now. None means "couldn't parse".
+#[cfg(test)]
 fn parse_due(s: &str, now: i64) -> Option<Option<i64>> {
+    parse_due_on(s, now, now.div_euclid(86400))
+}
+
+/// Like parse_due, but a clock time lands on `day` when that is a later day than today.
+fn parse_due_on(s: &str, now: i64, day: i64) -> Option<Option<i64>> {
     let s: String = s.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
     if s.is_empty() {
         return Some(None);
@@ -3945,6 +4476,9 @@ fn parse_due(s: &str, now: i64) -> Option<Option<i64>> {
     };
     if !(0..24).contains(&h) || !(0..60).contains(&m) {
         return None;
+    }
+    if day > now.div_euclid(86400) {
+        return Some(Some(day * 86400 + h * 3600 + m * 60));
     }
     let day = now.div_euclid(86400) * 86400;
     let mut t = day + h * 3600 + m * 60;
@@ -4018,7 +4552,7 @@ pub fn dbg_log(s: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_amount, parse_due};
+    use super::{left_label, parse_amount, parse_due, parse_due_on, passed_alerts, reminder_due};
 
     // 2026-11-03 20:00:00 in the naive-local epoch used by the app
     const NOW: i64 = 20760 * 86400 + 20 * 3600;
@@ -4044,6 +4578,50 @@ mod tests {
         assert_eq!(parse_due("1h 30m", NOW), Some(Some(NOW + 5400)));
         assert_eq!(parse_due("", NOW), Some(None));
         assert_eq!(parse_due("abc", NOW), None);
+    }
+
+    #[test]
+    fn clock_time_on_a_later_day() {
+        assert_eq!(parse_due_on("14:30", NOW, 20765), Some(Some(20765 * 86400 + 14 * 3600 + 30 * 60)));
+        // relative times stay relative to now
+        assert_eq!(parse_due_on("30m", NOW, 20765), Some(Some(NOW + 1800)));
+    }
+
+    #[test]
+    fn reminders() {
+        let due = NOW + 2 * 86400;
+        // nothing yet two days ahead
+        assert_eq!(reminder_due(due, NOW, 0), (None, 0));
+        // one day before: the 1-day notice
+        let (w, bits) = reminder_due(due, due - 86400, 0);
+        assert_eq!(w, Some(0));
+        // the same again does nothing
+        assert_eq!(reminder_due(due, due - 86000, bits), (None, bits));
+        // 6 h, 3 h, 1 h, 30 min
+        let (w, bits) = reminder_due(due, due - 6 * 3600, bits);
+        assert_eq!(w, Some(1));
+        let (w, bits) = reminder_due(due, due - 3 * 3600, bits);
+        assert_eq!(w, Some(2));
+        let (w, bits) = reminder_due(due, due - 3600, bits);
+        assert_eq!(w, Some(3));
+        let (w, bits) = reminder_due(due, due - 1800, bits);
+        assert_eq!(w, Some(4));
+        assert_eq!(bits, 0b11111);
+        // asleep (or in a game) from 5 h to 40 min before: only the closest one, once
+        let (w, bits) = reminder_due(due, due - 40 * 60, 0b1);
+        assert_eq!(w, Some(3));
+        assert_eq!(bits, 0b1111);
+        // overdue: none of them (the due-now notice takes over)
+        assert_eq!(reminder_due(due, due + 5, 0), (None, 0b11111));
+        // a task added 2 h before its deadline skips the 1-day, 6 h and 3 h ones
+        assert_eq!(passed_alerts(Some(NOW + 7200), NOW), 0b111);
+        assert_eq!(passed_alerts(None, NOW), 0);
+        assert_eq!(left_label(86400), "in 1 day");
+        assert_eq!(left_label(6 * 3600), "in 6 hours");
+        assert_eq!(left_label(3 * 3600 - 1), "in 3 hours");
+        assert_eq!(left_label(3600), "in 1 hour");
+        assert_eq!(left_label(1800), "in 30 minutes");
+        assert_eq!(left_label(40 * 60), "in 40 minutes");
     }
 
     #[test]
