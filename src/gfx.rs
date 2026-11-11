@@ -51,7 +51,16 @@ pub enum Al {
     R,
 }
 
-type FmtKey = (u32, u32, Al, bool, bool);
+/// Which typeface a text format uses.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Face {
+    Text,
+    Icon,
+    /// the clock: Segoe UI Variable Display, the lock-screen clock's typeface
+    Clock,
+}
+
+type FmtKey = (u32, u32, Al, Face, bool);
 
 pub struct Gfx {
     factory: ID2D1Factory,
@@ -84,6 +93,7 @@ pub struct Gfx {
     fmts: RefCell<HashMap<FmtKey, IDWriteTextFormat>>,
     text_font: Vec<u16>,
     icon_font: Vec<u16>,
+    clock_font: Vec<u16>,
     memdc: HDC,
     bits: *mut u8,
     dib: HBITMAP,
@@ -146,6 +156,7 @@ impl Gfx {
             };
             let text_font = if has("Segoe UI Variable Text") { "Segoe UI Variable Text" } else { "Segoe UI" };
             let icon_font = if has("Segoe Fluent Icons") { "Segoe Fluent Icons" } else { "Segoe MDL2 Assets" };
+            let clock_font = if has("Segoe UI Variable Display") { "Segoe UI Variable Display" } else { text_font };
 
             let memdc = CreateCompatibleDC(HDC::default());
             Ok(Gfx {
@@ -169,6 +180,7 @@ impl Gfx {
                 fmts: RefCell::new(HashMap::new()),
                 text_font: wide(text_font),
                 icon_font: wide(icon_font),
+                clock_font: wide(clock_font),
                 memdc,
                 bits: std::ptr::null_mut(),
                 dib: HBITMAP::default(),
@@ -580,13 +592,17 @@ impl Gfx {
         unsafe { self.rt.DrawGeometry(g, self.b(c), w, &self.round) }
     }
 
-    fn fmt(&self, size: f32, weight: u32, al: Al, icon: bool, wrap: bool) -> Option<IDWriteTextFormat> {
-        let key = ((size * 10.0) as u32, weight, al, icon, wrap);
+    fn fmt(&self, size: f32, weight: u32, al: Al, face: Face, wrap: bool) -> Option<IDWriteTextFormat> {
+        let key = ((size * 10.0) as u32, weight, al, face, wrap);
         if let Some(f) = self.fmts.borrow().get(&key) {
             return Some(f.clone());
         }
         unsafe {
-            let fam = if icon { &self.icon_font } else { &self.text_font };
+            let fam = match face {
+                Face::Text => &self.text_font,
+                Face::Icon => &self.icon_font,
+                Face::Clock => &self.clock_font,
+            };
             let f = self
                 .dw
                 .CreateTextFormat(
@@ -641,7 +657,7 @@ impl Gfx {
     /// Text that stays exactly as faded as asked, whatever theme.conf `text_contrast` says
     /// (dates of the neighbouring months in the calendar).
     pub fn text_dim(&self, s: &str, r: R, size: f32, weight: u32, c: C, al: Al) {
-        if let Some(f) = self.fmt(size, weight, al, false, false) {
+        if let Some(f) = self.fmt(size, weight, al, Face::Text, false) {
             self.draw_text_raw(s, r, &f, c);
         }
     }
@@ -655,19 +671,19 @@ impl Gfx {
     }
 
     pub fn text(&self, s: &str, r: R, size: f32, weight: u32, c: C, al: Al) {
-        if let Some(f) = self.fmt(size, weight, al, false, false) {
+        if let Some(f) = self.fmt(size, weight, al, Face::Text, false) {
             self.draw_text(s, r, &f, c);
         }
     }
 
     pub fn text_wrap(&self, s: &str, r: R, size: f32, weight: u32, c: C, al: Al) {
-        if let Some(f) = self.fmt(size, weight, al, false, true) {
+        if let Some(f) = self.fmt(size, weight, al, Face::Text, true) {
             self.draw_text(s, r, &f, c);
         }
     }
 
     pub fn icon(&self, ch: char, r: R, size: f32, c: C) {
-        if let Some(f) = self.fmt(size, 400, Al::C, true, false) {
+        if let Some(f) = self.fmt(size, 400, Al::C, Face::Icon, false) {
             let mut b = [0u8; 4];
             self.draw_text(ch.encode_utf8(&mut b), r, &f, self.icon_color(c));
         }
@@ -682,8 +698,23 @@ impl Gfx {
         }
     }
 
+    /// The time of day, in the clock's typeface.
+    pub fn clock(&self, s: &str, r: R, size: f32, weight: u32, c: C, al: Al) {
+        if let Some(f) = self.fmt(size, weight, al, Face::Clock, false) {
+            self.draw_text(s, r, &f, c);
+        }
+    }
+
     pub fn measure(&self, s: &str, size: f32, weight: u32) -> f32 {
-        let Some(f) = self.fmt(size, weight, Al::L, false, false) else { return 0.0 };
+        self.measure_face(s, size, weight, Face::Text)
+    }
+
+    pub fn measure_clock(&self, s: &str, size: f32, weight: u32) -> f32 {
+        self.measure_face(s, size, weight, Face::Clock)
+    }
+
+    fn measure_face(&self, s: &str, size: f32, weight: u32, face: Face) -> f32 {
+        let Some(f) = self.fmt(size, weight, Al::L, face, false) else { return 0.0 };
         let w: Vec<u16> = s.encode_utf16().collect();
         unsafe {
             if let Ok(l) = self.dw.CreateTextLayout(&w, &f, 10000.0, 100.0) {

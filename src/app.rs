@@ -1226,7 +1226,7 @@ impl App {
         match live {
             Live::Idle => IDLE_W,
             // art | clock | equalizer — must mirror draw_compact
-            Live::Media => 7.0 + (PILL_H - 10.0) + 6.0 + g.measure("88:88", CLOCK_SIZE, 700) + 24.0 + 6.0 + 18.0 + 14.0,
+            Live::Media => 7.0 + (PILL_H - 10.0) + 6.0 + g.measure_clock("88:88", CLOCK_SIZE, 600) + 24.0 + 6.0 + 18.0 + 14.0,
             Live::Pomo => {
                 let label = if self.pomo.mode == PMode::Break { "Break" } else { "Focus" };
                 12.0 + 16.0 + 6.0 + g.measure(label, 12.5, 600) + 22.0 + 16.0 + 6.0 + g.measure("88:88", 13.5, 600) + 14.0
@@ -1687,7 +1687,7 @@ impl App {
                 self.draw_eq(g, eq_x, c.cy(), m.playing, g.theme.spectrum.unwrap_or(acc));
                 // clock in the middle, between the artwork and the equalizer
                 let area = R::new(c.x + 7.0 + s + 6.0, c.y, (eq_x - 6.0) - (c.x + 7.0 + s + 6.0), c.h);
-                g.text(&hm(now().secs), area, CLOCK_SIZE, 700, WHITE, Al::C);
+                g.clock(&hm(now().secs), area, CLOCK_SIZE, 600, WHITE, Al::C);
                 if m.dur > 0.0 {
                     self.bottom_progress(g, full, (self.media_pos() / m.dur) as f32, g.theme.audio_bar.unwrap_or(acc).a(0.85));
                 }
@@ -1806,8 +1806,8 @@ impl App {
         let n = now();
         let mut x = inner.right();
         let clock = hm(n.secs);
-        let cw = g.measure(&clock, 13.0, 600);
-        g.text(&clock, R::new(x - cw - 2.0, inner.y, cw + 2.0, 28.0), 13.0, 600, WHITE, Al::R);
+        let cw = g.measure_clock(&clock, 13.5, 600);
+        g.clock(&clock, R::new(x - cw - 2.0, inner.y, cw + 2.0, 28.0), 13.5, 600, WHITE, Al::R);
         x -= cw + 10.0;
         let date = n.date_label();
         let dw = g.measure(&date, 12.0, 500);
