@@ -143,3 +143,7 @@ the cursor rests there, to see hovers. `VEYRA_DEBUG=1` writes a log to `%TEMP%\v
 * `cargo run --example close_probe -- <play_s> <watch_s>`: plays muted, then logs every 50 ms the session
   status, the player's windows, processes and audio, while you close the player.
 * `tools\debug_run.bat`: restarts Veyra with logging to `%TEMP%\veyra.log`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

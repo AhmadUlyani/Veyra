@@ -3,6 +3,7 @@ name = "veyra"
 version = "1.5.1"
 edition = "2021"
 description = "Veyra - a lightweight Dynamic Island for Windows"
+license = "MIT"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
