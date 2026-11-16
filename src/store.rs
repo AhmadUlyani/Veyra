@@ -61,11 +61,15 @@ pub struct Settings {
     pub line_mode: bool,
     /// put new screenshots on the Shelf
     pub screenshots: bool,
+    /// the open island closes only on a click outside it (or Esc), not when the mouse leaves
+    pub close_on_click: bool,
+    /// the closed island shows the current line of the song's synced lyrics
+    pub mini_lyrics: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { line_mode: false, screenshots: true }
+        Settings { line_mode: false, screenshots: true, close_on_click: false, mini_lyrics: false }
     }
 }
 

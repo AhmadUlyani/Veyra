@@ -10,7 +10,7 @@ display's refresh rate (60/120/144/165 Hz…) by waiting for vertical blank. The
 | Tab | What it does |
 | --- | --- |
 | Music | Shows what's playing in any player that reports to Windows media controls (Spotify, Apple Music, browsers/YouTube, …). Play/pause, previous/next, click the bar to seek. Scroll on the island to change volume. |
-| Lyrics | The speech-bubble button splits the island: live synced lyrics from [lrclib.net](https://lrclib.net). Click a line to jump to it. |
+| Lyrics | The speech-bubble button splits the island: live synced lyrics from [lrclib.net](https://lrclib.net). Click a line to jump to it. The button next to it (a small notch over two lines) puts the current line in the closed island instead of the clock, so you can follow the lyrics while working in another app. The pill keeps one width for the whole song and the next line slides up into place. Also in the menu as **Lyrics in the closed island**. |
 | Focus | Pomodoro timer (default 25/5), countdown in the compact pill, soft chime when a phase ends. |
 | Water | Bottle size, daily goal, reminder interval. Reminders run 07:00–23:00 until you reach the goal; switch them off with the Reminders toggle. |
 | Shelf | Drag files onto the island to keep them, drag them back out into chats, emails or folders. Images show a small preview. Click a file to open it. With many files, scroll to slide through them. New screenshots (saved in Pictures\Screenshots by Win+PrtScn or the Snipping Tool) are added automatically; switch that off in the tray menu. |
@@ -29,13 +29,16 @@ Both can be switched off in the menu, and stay off after that.
 * Click the pill to expand it (buttons react when the mouse button is released, so holding it down does nothing).
   It collapses by itself shortly after the mouse leaves it, or with `Esc` or a click outside; clicks inside
   the island never close it. It stays open while you type in a field or hold the mouse button.
+  To keep it open until you click outside it, pick **Close the open island → Only by clicking outside it**
+  in the menu (back with **Automatically when the mouse leaves**). `Esc` closes it either way.
 * A task or clipboard entry too long for its row ends in "…"; hold the mouse over it and the text slides to show the rest.
 * Right-click the island or the tray icon for **Hide / Show Veyra**, **Shrink to a line until hovered**,
+  **Lyrics in the closed island**, **Close the open island**,
   **Add screenshots to Shelf**, **Start with Windows** and **Quit**.
   Left-click the tray icon to bring a hidden island back.
 * **Shrink to a line until hovered** (off by default): the closed island becomes a thin line at the top of the
   screen. Move the mouse onto the line, or within about 1 cm of it, and the normal pill comes back.
-  Notices still show as usual.
+  Notices still show as usual, and so do lyrics while **Lyrics in the closed island** is on.
 * Veyra adds itself to the Start menu on first run, so you can launch it from Windows Search.
   Launching it again while it runs (or is hidden) just opens the island.
 * Data is stored in `%APPDATA%\Veyra\data.json`.

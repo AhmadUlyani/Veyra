@@ -14,6 +14,9 @@ pub const CMD_THEME: u32 = 13;
 pub const CMD_LINE: u32 = 14;
 pub const CMD_SHOTS: u32 = 15;
 pub const CMD_UPDATE: u32 = 16;
+pub const CMD_CLOSE_AUTO: u32 = 17;
+pub const CMD_CLOSE_CLICK: u32 = 18;
+pub const CMD_MINI_LYRICS: u32 = 19;
 
 /// Check marks shown in the menu.
 pub struct MenuState {
@@ -21,6 +24,8 @@ pub struct MenuState {
     pub hidden: bool,
     pub line_mode: bool,
     pub screenshots: bool,
+    pub close_on_click: bool,
+    pub mini_lyrics: bool,
     /// a newer version that can be installed, or what the update item says while busy
     pub update: Option<String>,
     pub update_busy: bool,
@@ -63,6 +68,12 @@ pub fn menu(hwnd: HWND, st: &MenuState) -> u32 {
         let hide = if st.hidden { w!("Show Veyra") } else { w!("Hide Veyra") };
         let _ = AppendMenuW(m, MF_STRING, CMD_HIDE as usize, hide);
         let _ = AppendMenuW(m, check(st.line_mode), CMD_LINE as usize, w!("Shrink to a line until hovered"));
+        let _ = AppendMenuW(m, check(st.mini_lyrics), CMD_MINI_LYRICS as usize, w!("Lyrics in the closed island"));
+        if let Ok(sub) = CreatePopupMenu() {
+            let _ = AppendMenuW(sub, check(!st.close_on_click), CMD_CLOSE_AUTO as usize, w!("Automatically when the mouse leaves"));
+            let _ = AppendMenuW(sub, check(st.close_on_click), CMD_CLOSE_CLICK as usize, w!("Only by clicking outside it"));
+            let _ = AppendMenuW(m, MF_POPUP, sub.0 as usize, w!("Close the open island"));
+        }
         let _ = AppendMenuW(m, check(st.screenshots), CMD_SHOTS as usize, w!("Add screenshots to Shelf"));
         let _ = AppendMenuW(m, check(st.autostart), CMD_AUTOSTART as usize, w!("Start with Windows"));
         let _ = AppendMenuW(m, MF_STRING, CMD_THEME as usize, w!("UI colors (theme.conf)..."));

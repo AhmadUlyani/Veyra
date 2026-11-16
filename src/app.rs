@@ -130,12 +130,20 @@ struct Edit {
 enum Live {
     Idle,
     Media,
+    /// media with the current line of its synced lyrics (mini lyrics)
+    Lyrics,
     Pomo,
     Task,
 }
 
 // compact-island metrics (DIP)
 const PILL_H: f32 = 32.0;
+/// track key of the made-up song in the mini lyrics demo
+const DEMO_KEY: u64 = 42;
+/// mini lyrics: text size and the limits of the lyric line's width
+const MINI_SIZE: f32 = 13.0;
+const MINI_MIN_W: f32 = 170.0;
+const MINI_MAX_W: f32 = 400.0;
 const TASK_SOON_MIN: i64 = 15;
 /// Early task reminders: how long before the deadline, and how the notice says it.
 /// Bit i of `Task::alerts` marks entry i as shown.
@@ -239,6 +247,8 @@ enum Act {
     Next,
     Seek(R),
     Lyrics,
+    /// lyrics in the closed island on/off
+    MiniLyrics,
     LyricLine(f64),
     FocusToggle,
     FocusReset,
@@ -389,6 +399,27 @@ struct Slide {
 }
 
 const SLIDE_SECS: f32 = 0.34;
+
+/// The artwork travelling between the open island and the closed pill (both ways), while the
+/// old view's content fades out and the new one fades in.
+#[derive(Clone, Copy)]
+struct Morph {
+    /// where the artwork was (relative to the screen's center) and its corner radius
+    from: R,
+    from_rad: f32,
+    /// island height when it started: progress is measured by the height
+    h0: f32,
+    /// the view being left, laid out at its own size while it fades
+    old: ViewKey,
+    old_w: f32,
+    old_h: f32,
+}
+/// spring speed while morphing: critically damped (no bounce), settles in about 0.4 s
+const MORPH_W: f32 = 16.0;
+/// how long the old view takes to fade out
+const MORPH_FADE: f32 = 0.16;
+/// clock <-> lyric line in the closed pill
+const MINI_SECS: f32 = 0.55;
 
 struct Ui {
     hits: Vec<(R, Act)>,
@@ -553,6 +584,26 @@ pub struct App {
     /// a long line under the mouse is sliding (keeps frames coming), and which one since when
     marquee_on: std::cell::Cell<bool>,
     marquee_at: std::cell::Cell<Option<(u64, Instant)>>,
+    /// mini lyrics: width of the lyric text area for the lyrics of this track key
+    mini_w: std::cell::Cell<Option<(u64, f32)>>,
+    /// last lyric width and line shown, kept while the pill turns back into the clock
+    mini_last_w: std::cell::Cell<f32>,
+    mini_last_txt: std::cell::RefCell<String>,
+    /// clock -> lyric line in the closed pill, 0..1 (linear; eased when used)
+    mini_p: f32,
+    morph: Option<Morph>,
+    /// the artwork drawn in the last frame (relative to the screen's center) and its radius
+    art_last: std::cell::Cell<Option<(R, f32)>>,
+    /// where the current view puts the artwork while a morph draws it instead
+    art_slot: std::cell::Cell<Option<(R, f32)>>,
+    /// 0: draw the artwork, 1: only note where it goes (morph), 2: leave it out (old view)
+    art_mode: std::cell::Cell<u8>,
+    /// the island's shape as drawn this frame, hover growth included
+    shape_r: std::cell::Cell<R>,
+    /// testing aid: a scripted step at a given time (see tick)
+    demo_step: Option<(Instant, &'static str)>,
+    demo_lyrics: Lyr,
+    anim_stat_seq: u32,
     /// a newer release found on GitHub
     upd_avail: Option<update::Release>,
     /// checking or installing right now
@@ -710,6 +761,18 @@ impl App {
             open_k: 0.0,
             marquee_on: std::cell::Cell::new(false),
             marquee_at: std::cell::Cell::new(None),
+            mini_w: std::cell::Cell::new(None),
+            mini_last_w: std::cell::Cell::new(MINI_MIN_W),
+            mini_last_txt: std::cell::RefCell::new(String::new()),
+            mini_p: 0.0,
+            morph: None,
+            art_last: std::cell::Cell::new(None),
+            art_slot: std::cell::Cell::new(None),
+            art_mode: std::cell::Cell::new(0),
+            shape_r: std::cell::Cell::new(R::default()),
+            demo_step: None,
+            demo_lyrics: Lyr::None,
+            anim_stat_seq: 0,
             upd_avail: None,
             upd_busy: false,
             upd_manual: false,
@@ -795,6 +858,39 @@ impl App {
                 self.ensure_lyrics();
             }
             "media" => self.expand(Some(Tab::Media)),
+            // closed island with mini lyrics: a made-up track and lyrics
+            "minilyrics" | "minilyricsline" => {
+                self.demo_mini();
+                if v == "minilyricsline" {
+                    self.data.settings.line_mode = true;
+                }
+            }
+            "minilyricsbtn" => {
+                self.demo_mini();
+                self.expand(Some(Tab::Media));
+            }
+            // transitions (watch with VEYRA_DUMP_SEQ): the lyrics arrive while closed / the open
+            // island closes into the lyric pill / the lyric pill opens
+            "minimorph" => {
+                self.demo_mini();
+                self.demo_lyrics = std::mem::replace(&mut self.lyr, Lyr::Loading);
+                self.demo_step = Some((Instant::now() + Duration::from_millis(700), "found"));
+            }
+            "minimorphline" => {
+                self.demo_mini();
+                self.data.settings.line_mode = true;
+                self.demo_lyrics = std::mem::replace(&mut self.lyr, Lyr::Loading);
+                self.demo_step = Some((Instant::now() + Duration::from_millis(700), "found"));
+            }
+            "minicollapse" => {
+                self.demo_mini();
+                self.expand(Some(Tab::Media));
+                self.demo_step = Some((Instant::now() + Duration::from_millis(900), "collapse"));
+            }
+            "miniexpand" => {
+                self.demo_mini();
+                self.demo_step = Some((Instant::now() + Duration::from_millis(900), "expand"));
+            }
             "focus" => {
                 self.start_phase(PMode::Focus);
                 self.expand(Some(Tab::Focus));
@@ -934,6 +1030,29 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn demo_mini(&mut self) {
+        let key = DEMO_KEY;
+        self.media = Some(MediaState {
+            title: "Midnight Drive".into(),
+            artist: "Veyra".into(),
+            album: String::new(),
+            app: "Spotify".into(),
+            playing: true,
+            pos: 14.0,
+            dur: 200.0,
+            at: Instant::now(),
+            can_seek: true,
+            key,
+        });
+        self.data.settings.mini_lyrics = true;
+        // the user's own line mode would change what these demos show
+        self.data.settings.line_mode = false;
+        self.lyr_key = key;
+        let lines = ["City lights are fading in the mirror", "Hold the wheel and never look behind", "We were young and running out of summer", ""];
+        self.lyr = Lyr::Found(lines.iter().enumerate().map(|(i, t)| Line { t: 6.0 + i as f64 * 6.0, text: t.to_string() }).collect());
+        self.lyr_scroll = 1.0;
     }
 
     pub fn save_now(&mut self) {
@@ -1110,6 +1229,10 @@ impl App {
         self.expanded = true;
         self.toast = None;
         self.collapse_at = None;
+        if self.data.settings.close_on_click {
+            // a click anywhere else closes it, also when Windows did not let it become active
+            system::watch_clicks(true);
+        }
         unsafe {
             let _ = SetForegroundWindow(self.hwnd);
         }
@@ -1175,20 +1298,22 @@ impl App {
                 return (w, TWO_H, 20.0, ViewKey::Toast(t.id));
             }
         }
-        if self.data.settings.line_mode && !self.hover_on && !self.drag_hover && !self.hidden {
+        if self.data.settings.line_mode && !self.hover_on && !self.drag_hover && !self.hidden && !self.mini_on() {
             return (LINE_W, LINE_H, LINE_H / 2.0, ViewKey::Line);
         }
         let (live, sec) = self.lives();
         // hover growth is added on top in render(), driven by its own spring
         let w = self.compact_width(live) + self.segment_width(sec);
-        (w, PILL_H, 13.0, ViewKey::Compact(live))
+        // clock and lyric line are one view: the pill morphs between them (see mini_p)
+        let key = if live == Live::Lyrics { Live::Media } else { live };
+        (w, PILL_H, 13.0, ViewKey::Compact(key))
     }
 
     /// (primary activity, optional secondary activity shown at the right end of the island)
     fn lives(&self) -> (Live, Option<Live>) {
         let mut v = Vec::with_capacity(3);
         if self.media.is_some() {
-            v.push(Live::Media);
+            v.push(if self.mini_on() { Live::Lyrics } else { Live::Media });
         }
         if self.pomo.active() {
             v.push(Live::Pomo);
@@ -1197,6 +1322,47 @@ impl App {
             v.push(Live::Task);
         }
         (v.first().copied().unwrap_or(Live::Idle), v.get(1).copied())
+    }
+
+    /// Mini lyrics are on and this track's synced lyrics are here.
+    fn mini_on(&self) -> bool {
+        self.data.settings.mini_lyrics
+            && matches!(&self.lyr, Lyr::Found(_))
+            && self.media.as_ref().map(|m| m.key == self.lyr_key).unwrap_or(false)
+    }
+
+    /// Width of the lyric line in the closed island: fits the song's longest line (within
+    /// limits), worked out once per track so the island keeps one size for the whole song.
+    fn mini_text_w(&self) -> f32 {
+        // no lyrics (yet): the last width, while the pill turns back into the clock
+        let Lyr::Found(v) = &self.lyr else { return self.mini_last_w.get() };
+        let w = match self.mini_w.get() {
+            Some((k, w)) if k == self.lyr_key => w,
+            _ => {
+                let longest = v.iter().map(|l| self.gfx.measure(&l.text, MINI_SIZE, 600)).fold(0.0f32, f32::max);
+                let w = (longest + 8.0).clamp(MINI_MIN_W, MINI_MAX_W);
+                self.mini_w.set(Some((self.lyr_key, w)));
+                w
+            }
+        };
+        self.mini_last_w.set(w);
+        w
+    }
+
+    /// clock (0) -> lyric line (1) in the closed pill, eased in and out
+    fn mini_k(&self) -> f32 {
+        let p = self.mini_p.clamp(0.0, 1.0);
+        p * p * p * (p * (p * 6.0 - 15.0) + 10.0)
+    }
+
+    /// How far a morph has come, 0..1, measured by the island's height.
+    fn morph_p(&self, m: &Morph) -> f32 {
+        let span = self.sh.t - m.h0;
+        if span.abs() < 1.0 {
+            smooth(self.view_age / 0.35)
+        } else {
+            ((self.sh.x - m.h0) / span).clamp(0.0, 1.0)
+        }
     }
 
     /// The nearest unfinished task due within the next few minutes (or just overdue).
@@ -1225,8 +1391,16 @@ impl App {
         let g = &self.gfx;
         match live {
             Live::Idle => IDLE_W,
-            // art | clock | equalizer — must mirror draw_compact
-            Live::Media => 7.0 + (PILL_H - 10.0) + 6.0 + g.measure_clock("88:88", CLOCK_SIZE, 600) + 24.0 + 6.0 + 18.0 + 14.0,
+            // art | clock or lyric line | equalizer — must mirror draw_compact
+            Live::Media | Live::Lyrics => {
+                let clock = 7.0 + (PILL_H - 10.0) + 6.0 + g.measure_clock("88:88", CLOCK_SIZE, 600) + 24.0 + 6.0 + 18.0 + 14.0;
+                let k = self.mini_k();
+                if k <= 0.0 {
+                    return clock;
+                }
+                let lyric = 7.0 + (PILL_H - 10.0) + 10.0 + self.mini_text_w() + 10.0 + 18.0 + 14.0;
+                clock + (lyric - clock) * k
+            }
             Live::Pomo => {
                 let label = if self.pomo.mode == PMode::Break { "Break" } else { "Focus" };
                 12.0 + 16.0 + 6.0 + g.measure(label, 12.5, 600) + 22.0 + 16.0 + 6.0 + g.measure("88:88", 13.5, 600) + 14.0
@@ -1246,6 +1420,18 @@ impl App {
         let dt = (n - self.last_frame).as_secs_f32().min(1.0 / 30.0);
         self.last_frame = n;
         self.anim_stat.1 += 1;
+        // clock <-> lyric line: eased over MINI_SECS in the closed pill; anywhere else it is
+        // simply where it should be (the island closes straight into the right one)
+        let mini_t = if self.mini_on() { 1.0 } else { 0.0 };
+        // (the line shows neither: the pill drops out of it already showing the right one)
+        let pill = matches!(self.view, ViewKey::Compact(_));
+        let mini_moving = pill && (self.mini_p - mini_t).abs() > 0.0001;
+        if !pill {
+            self.mini_p = mini_t;
+        } else if mini_moving {
+            let step = dt / MINI_SECS;
+            self.mini_p = if mini_t > self.mini_p { (self.mini_p + step).min(1.0) } else { (self.mini_p - step).max(0.0) };
+        }
         let (tw, th, tr, key) = self.target();
         let hover_still = self.step_hover(n, dt, key);
         self.view_wh = Some((tw, th));
@@ -1272,6 +1458,14 @@ impl App {
             if key == ViewKey::Line {
                 self.line_from_pill = matches!(self.view, ViewKey::Compact(_));
             }
+            // open <-> closed with music: the artwork travels to its new place
+            let media_view = |v: ViewKey| matches!(v, ViewKey::Expanded(Tab::Media, _) | ViewKey::Compact(Live::Media));
+            self.morph = match self.art_last.get() {
+                Some((from, from_rad)) if media_view(self.view) && media_view(key) && self.media.is_some() && self.leaving.is_none() => {
+                    Some(Morph { from, from_rad, h0: self.sh.x, old: self.view, old_w: self.sw.t, old_h: self.sh.t })
+                }
+                _ => None,
+            };
             self.pill_from_line = matches!(key, ViewKey::Compact(_)) && self.view == ViewKey::Line && self.sh.x < PILL_H;
             self.view = key;
         }
@@ -1295,7 +1489,11 @@ impl App {
         let mut rem = dt;
         while rem > 0.0 {
             let s = rem.min(1.0 / 240.0);
-            if line_pill {
+            if self.morph.is_some() {
+                self.sw.step_fast(s, MORPH_W);
+                self.sh.step_fast(s, MORPH_W);
+                self.sr.step_fast(s, MORPH_W);
+            } else if line_pill {
                 let (ww, hw) = if self.view == ViewKey::Line {
                     (LINE_SPRING_W, LINE_RISE)
                 } else {
@@ -1310,6 +1508,19 @@ impl App {
                 self.sr.step(s);
             }
             rem -= s;
+        }
+        // the clock <-> lyrics morph moves the width itself, eased: the shape follows it exactly
+        if mini_moving && matches!(self.view, ViewKey::Compact(_)) && self.morph.is_none() && self.view_age > 0.35 {
+            self.sw.x = self.sw.t;
+            self.sw.v = 0.0;
+        }
+        if self.leaving.is_some() {
+            self.morph = None;
+        }
+        if let Some(m) = self.morph {
+            if self.morph_p(&m) >= 0.999 && self.sw.done() && self.sh.done() {
+                self.morph = None;
+            }
         }
         self.view_age += dt;
         // closed ↔ open colors: ease toward the open colors while expanded
@@ -1349,6 +1560,17 @@ impl App {
         if !self.hidden || dump.is_some() {
             self.render();
         }
+        // testing aid: VEYRA_DUMP_SEQ=<folder> saves every frame (f000.bmp, ...) for ~2.5 s, then quits
+        if let Ok(dir) = std::env::var("VEYRA_DUMP_SEQ") {
+            let i = self.anim_stat_seq;
+            self.anim_stat_seq += 1;
+            if !self.hidden {
+                self.gfx.dump_bmp(&format!("{dir}/f{i:03}.bmp"), self.win.2, self.win.3);
+            }
+            if self.t0.elapsed() > Duration::from_millis(2500) {
+                crate::quit_now();
+            }
+        }
         // testing aid: with VEYRA_DEMO + VEYRA_DUMP=<file.bmp>, save the settled frame and quit
         if let Some(path) = dump {
             if self.view_age > 0.3 && self.slide.is_none() && self.sw.done() && self.sh.done() {
@@ -1365,6 +1587,8 @@ impl App {
             && !shelf_moving
             && !open_moving
             && hover_still
+            && !mini_moving
+            && self.morph.is_none()
             && !self.marquee_on.get();
         if settled {
             self.sw.snap();
@@ -1507,6 +1731,7 @@ impl App {
         // only the bottom corners are rounded, then add the concave shoulders.
         let shape = R::new(isl.x, isl.y - rad, isl.w, isl.h + rad);
         let (top, bottom) = (isl.y, isl.y + isl.h);
+        self.shape_r.set(isl);
         g.rrect_bg(shape, rad, top, bottom);
         let f = SHOULDER.min(isl.h * 0.5);
         g.shoulder_bg(isl.x, isl.y, f, true, top, bottom);
@@ -1546,7 +1771,10 @@ impl App {
             // content goes first, then the black shape follows it into the edge
             alpha *= 1.0 - smooth(since.elapsed().as_secs_f32() / 0.12);
         }
-        if alpha <= 0.01 {
+        let morph = self.morph.filter(|_| self.leaving.is_none());
+        self.art_last.set(None);
+        // a morph still needs to know where the new view puts the artwork
+        if alpha <= 0.01 && morph.is_none() {
             return;
         }
         // The size that came with `view`. Asking target() again here could answer for a newer
@@ -1557,6 +1785,18 @@ impl App {
             let (w, h, _, _) = self.target();
             (w, h)
         });
+        // Hovered, the pill grows a little taller: its content moves down by half of that, so it
+        // stays in the middle (whole pixels once the hover is at rest, so the text stays sharp)
+        let hov_dy = if matches!(self.view, ViewKey::Compact(_)) {
+            let d = HOVER_H * self.hov / 2.0;
+            if self.hov <= 0.0 || self.hov >= 1.0 {
+                px(d)
+            } else {
+                d
+            }
+        } else {
+            0.0
+        };
         let c = match self.view {
             ViewKey::Line => {
                 // still rising from the pill: lay its content out at the pill's size
@@ -1565,7 +1805,8 @@ impl App {
                 R::new(px(self.screen_cx - cw / 2.0), isl.y + drop_y, cw, PILL_H)
             }
             // the shape's width (hover) moves its center by a pixel now and then: not the content
-            ViewKey::Compact(_) if self.data.settings.line_mode => R::new(px(self.screen_cx - tw / 2.0), isl.y + drop_y, tw, th),
+            ViewKey::Compact(_) if self.data.settings.line_mode => R::new(px(self.screen_cx - tw / 2.0), isl.y + drop_y + hov_dy, tw, th),
+            ViewKey::Compact(_) => R::new(isl.cx() - tw / 2.0, isl.y + hov_dy, tw, th),
             _ => R::new(isl.cx() - tw / 2.0, isl.y, tw, th),
         };
         // Open and at rest, the content sits inside the shape clear of its rounded corners, so a
@@ -1578,10 +1819,28 @@ impl App {
             && self.sw.done()
             && self.sh.done()
             && self.sr.done();
+        if let Some(m) = morph {
+            // the view being left: at its own size, fading out quickly as the shape changes
+            let fade = 1.0 - smooth(self.view_age / MORPH_FADE);
+            if fade > 0.01 {
+                g.push_rr(shape, rad, fade);
+                let oc = R::new(isl.cx() - m.old_w / 2.0, isl.y, m.old_w, m.old_h);
+                let mut dummy = Ui { hits: Vec::new(), mouse: None };
+                self.art_mode.set(2);
+                match m.old {
+                    ViewKey::Expanded(t, l) => self.draw_expanded(g, &mut dummy, oc, t, l),
+                    ViewKey::Compact(live) => self.draw_compact(g, &mut dummy, oc, live),
+                    _ => {}
+                }
+                g.pop();
+            }
+            self.art_mode.set(1);
+            self.art_slot.set(None);
+        }
         if at_rest {
             g.push_rr(shape, 0.0, 1.0);
         } else {
-            g.push_rr(shape, rad, alpha);
+            g.push_rr(shape, rad, alpha.max(0.0));
         }
         match self.view {
             ViewKey::Compact(live) => self.draw_compact(g, ui, c, live),
@@ -1594,11 +1853,39 @@ impl App {
             ViewKey::Expanded(tab, lyr) => self.draw_expanded(g, ui, c, tab, lyr),
         }
         g.pop();
+        self.art_mode.set(0);
+        if let (Some(m), Some((to, to_rad))) = (morph, self.art_slot.get()) {
+            // the artwork, fully visible the whole way, from where it was to where it goes
+            // a little ahead of the shape, so it arrives together with the text (which is laid
+            // out at its final place from the start) instead of trailing behind it
+            let p = 1.0 - (1.0 - self.morph_p(&m)).powi(2);
+            let lerp = |a: f32, b: f32| a + (b - a) * p;
+            let from = R::new(m.from.x + self.screen_cx, m.from.y, m.from.w, m.from.h);
+            let r = R::new(lerp(from.x, to.x), lerp(from.y, to.y), lerp(from.w, to.w), lerp(from.h, to.h));
+            let rr = lerp(m.from_rad, to_rad);
+            g.push_rr(shape, rad, 1.0);
+            self.draw_art_now(g, r, rr);
+            g.pop();
+            self.art_last.set(Some((R::new(r.x - self.screen_cx, r.y, r.w, r.h), rr)));
+        }
     }
 
     // -------------------------------------------------------------- compact
 
     fn draw_art(&self, g: &Gfx, r: R, rad: f32) {
+        match self.art_mode.get() {
+            2 => return,
+            1 => {
+                self.art_slot.set(Some((r, rad)));
+                return;
+            }
+            _ => {}
+        }
+        self.art_last.set(Some((R::new(r.x - self.screen_cx, r.y, r.w, r.h), rad)));
+        self.draw_art_now(g, r, rad);
+    }
+
+    fn draw_art_now(&self, g: &Gfx, r: R, rad: f32) {
         match self.cur_art() {
             Some(b) => g.bitmap(b, r, rad),
             None => {
@@ -1608,10 +1895,14 @@ impl App {
         }
     }
 
-    /// Thin progress line hugging the bottom edge (clipped by the rounded corners).
-    fn bottom_progress(&self, g: &Gfx, c: R, f: f32, col: C) {
+    /// The pill's progress line: along the shape's very bottom edge, from one side to the other
+    /// (hover growth included, clipped by the rounded corners), a pixel thicker while hovered.
+    fn bottom_progress(&self, g: &Gfx, f: f32, col: C) {
         if f > 0.0 {
-            g.rect(R::new(c.x, c.bottom() - 2.0, c.w * f.clamp(0.0, 1.0), 2.0), col);
+            let s = self.shape_r.get();
+            let sc = self.gfx.scale;
+            let t = ((2.0 + self.hov) * sc).round() / sc;
+            g.rect(R::new(s.x, s.bottom() - t, s.w * f.clamp(0.0, 1.0), t), col);
         }
     }
 
@@ -1678,18 +1969,33 @@ impl App {
         match live {
             // idle: an empty notch, also while hovered (it only grows a little)
             Live::Idle => {}
-            Live::Media => {
+            Live::Media | Live::Lyrics => {
                 let Some(m) = &self.media else { return };
                 let acc = self.accent();
                 let s = c.h - 10.0;
                 self.draw_art(g, R::new(c.x + 7.0, c.y + 5.0, s, s), 6.0);
                 let eq_x = c.right() - 14.0 - 18.0;
                 self.draw_eq(g, eq_x, c.cy(), m.playing, g.theme.spectrum.unwrap_or(acc));
-                // clock in the middle, between the artwork and the equalizer
-                let area = R::new(c.x + 7.0 + s + 6.0, c.y, (eq_x - 6.0) - (c.x + 7.0 + s + 6.0), c.h);
-                g.clock(&hm(now().secs), area, CLOCK_SIZE, 600, WHITE, Al::C);
-                if m.dur > 0.0 {
-                    self.bottom_progress(g, full, (self.media_pos() / m.dur) as f32, g.theme.audio_bar.unwrap_or(acc).a(0.85));
+                // between the artwork and the equalizer: the clock, or the lyric line. Switching,
+                // the clock drifts up and fades while the line rises into place.
+                let k = self.mini_k();
+                let gap = 6.0 + 4.0 * k;
+                let x0 = c.x + 7.0 + s + gap;
+                let area = R::new(x0, c.y, eq_x - gap - x0, c.h);
+                // one after the other, so the two never sit on top of each other: the clock is
+                // gone by the middle, the line comes in during the second half
+                let out = smooth(k / 0.45);
+                let inn = smooth((k - 0.4) / 0.6);
+                if out < 0.999 {
+                    let r = R::new(area.x, area.y - 9.0 * out, area.w, area.h);
+                    g.clock(&hm(now().secs), r, CLOCK_SIZE, 600, WHITE.a(1.0 - out), Al::C);
+                }
+                if inn > 0.001 {
+                    self.draw_mini_line(g, R::new(area.x, area.y + 9.0 * (1.0 - inn), area.w, area.h), m, inn);
+                }
+                // the line hugs the pill's lower edge: not while a taller shape is still closing
+                if m.dur > 0.0 && self.sh.x < PILL_H + 3.0 {
+                    self.bottom_progress(g, (self.media_pos() / m.dur) as f32, g.theme.audio_bar.unwrap_or(acc).a(0.85));
                 }
             }
             Live::Pomo => {
@@ -1705,7 +2011,7 @@ impl App {
                 let rcx = tr.right() - g.measure(&txt, 13.5, 600) - 14.0;
                 g.circle_stroke(rcx, c.cy(), 6.5, col.a(0.25), 2.2);
                 g.arc(rcx, c.cy(), 6.5, (rem / self.pomo.total) as f32, 2.2, col);
-                self.bottom_progress(g, full, 1.0 - (rem / self.pomo.total) as f32, col.a(0.85));
+                self.bottom_progress(g, 1.0 - (rem / self.pomo.total) as f32, col.a(0.85));
             }
             Live::Task => {
                 let Some((text, due, now_due)) = self.task_line() else { return };
@@ -1716,6 +2022,57 @@ impl App {
                 g.text(&text, R::new(c.x + 36.0, c.y, c.w - 36.0 - dw - 24.0, c.h), 12.5, 500, WHITE.a(0.9), Al::L);
             }
         }
+    }
+
+    /// The current lyric line in the closed island. A new line slides up into place while the
+    /// old one leaves upward (following the same scroll as the big lyrics view).
+    /// `fade`: how far the line has come in (0..1) while the pill switches from the clock.
+    fn draw_mini_line(&self, g: &Gfx, a: R, m: &MediaState, fade: f32) {
+        let remember = |t: &str| {
+            let mut last = self.mini_last_txt.borrow_mut();
+            if last.as_str() != t {
+                last.clear();
+                last.push_str(t);
+            }
+        };
+        let v = match &self.lyr {
+            Lyr::Found(v) if self.lyr_key == m.key => v,
+            _ => {
+                // the lyrics are gone (next song): the last line fades out with the morph
+                let last = self.mini_last_txt.borrow();
+                if !last.is_empty() {
+                    g.text(&last, a, MINI_SIZE, 600, WHITE.a(fade), Al::C);
+                }
+                return;
+            }
+        };
+        let Some(cur) = self.cur_line() else {
+            // before the first line: the song's title, dimmed
+            g.text(&m.title, a, MINI_SIZE, 500, T2.a(T2.3 * fade), Al::C);
+            remember(&m.title);
+            return;
+        };
+        let line_text = |i: usize| {
+            let t = v[i].text.as_str();
+            if t.trim().is_empty() {
+                "\u{266A}"
+            } else {
+                t
+            }
+        };
+        g.push_rr(a, 0.0, 1.0);
+        let sc = self.lyr_scroll;
+        let first = sc.floor().max(0.0) as usize;
+        for i in (first..v.len()).take(2) {
+            let d = i as f32 - sc;
+            if d.abs() >= 1.0 {
+                continue;
+            }
+            let r = R::new(a.x, a.y + d * a.h * 0.8, a.w, a.h);
+            g.text(line_text(i), r, MINI_SIZE, 600, WHITE.a((1.0 - d.abs()) * fade), Al::C);
+        }
+        g.pop();
+        remember(line_text(cur));
     }
 
     // -------------------------------------------------------------- toast
@@ -1888,7 +2245,18 @@ impl App {
             g.rrect(lb, 10.0, if self.lyrics_open { g.theme.button_active.unwrap_or(acc.a(0.22)) } else { surf(g, false) });
         }
         g.icon(ic::LYRICS, lb, 14.0, if self.lyrics_open { active_icon(g, acc) } else { T2 });
-        let tw = col.w - 40.0;
+        // lyrics in the closed island: a small notch over two lines of text
+        let mb = R::new(lb.x - 36.0, lb.y, 32.0, 28.0);
+        let mini = self.data.settings.mini_lyrics;
+        let hv = ui.hit(mb, Act::MiniLyrics);
+        if mini || hv {
+            g.rrect(mb, 10.0, if mini { g.theme.button_active.unwrap_or(acc.a(0.22)) } else { surf(g, false) });
+        }
+        let mc = if mini { active_icon(g, acc) } else { T2 };
+        g.rrect(R::new(mb.cx() - 7.0, mb.cy() - 6.5, 14.0, 5.0), 2.5, mc);
+        g.line(mb.cx() - 6.0, mb.cy() + 2.0, mb.cx() + 6.0, mb.cy() + 2.0, 1.6, mc);
+        g.line(mb.cx() - 4.0, mb.cy() + 5.5, mb.cx() + 4.0, mb.cy() + 5.5, 1.6, mc.a(0.7));
+        let tw = col.w - 76.0;
         g.text(&m.title, R::new(col.x, col.y, tw, 22.0), 16.0, 600, WHITE, Al::L);
         let sub = if split && !m.app.is_empty() && !m.artist.is_empty() {
             format!("{} · {}", m.artist, m.app)
@@ -2827,6 +3195,7 @@ impl App {
                     }
                 }
             }
+            Act::MiniLyrics => self.toggle_mini_lyrics(),
             Act::LyricLine(t) => {
                 if let Some(m) = &mut self.media {
                     m.pos = t;
@@ -2995,6 +3364,18 @@ impl App {
                 if let Some(a) = &self.audio {
                     a.set(f);
                 }
+            }
+        }
+        self.kick();
+    }
+
+    fn toggle_mini_lyrics(&mut self) {
+        self.data.settings.mini_lyrics = !self.data.settings.mini_lyrics;
+        self.dirty = true;
+        if self.data.settings.mini_lyrics {
+            self.ensure_lyrics();
+            if let Some(c) = self.cur_line() {
+                self.lyr_scroll = c as f32;
             }
         }
         self.kick();
@@ -3214,6 +3595,19 @@ impl App {
             }
         }
 
+        if let Some((at, what)) = self.demo_step {
+            if n >= at {
+                self.demo_step = None;
+                match what {
+                    "found" => self.lyr = std::mem::replace(&mut self.demo_lyrics, Lyr::None),
+                    "collapse" => self.collapse(),
+                    "expand" => self.expand(Some(Tab::Media)),
+                    _ => {}
+                }
+                self.kick();
+            }
+        }
+
         if let Some(at) = self.demo_switch {
             if n >= at {
                 self.demo_switch = None;
@@ -3428,6 +3822,10 @@ impl App {
                     if self.demo_idle {
                         m = None;
                     }
+                    // the made-up track of the mini lyrics demo stays
+                    if self.demo && self.lyr_key == DEMO_KEY {
+                        continue;
+                    }
                     let old = self.media.as_ref().map(|m| m.key);
                     let new = m.as_ref().map(|m| m.key);
                     // Keep the optimistic play/pause state until the player confirms it,
@@ -3446,7 +3844,7 @@ impl App {
                             self.lyrics_open = false;
                         }
                     }
-                    if new != old && self.lyrics_open {
+                    if new != old && (self.lyrics_open || self.data.settings.mini_lyrics) {
                         self.ensure_lyrics();
                     }
                 }
@@ -3512,8 +3910,10 @@ impl App {
                     self.tab = if text { Tab::Clipboard } else { Tab::Shelf };
                 }
                 Event::MouseDown => {
-                    // opened by a drag, so not the active window: a click elsewhere closes it
-                    if self.expanded && self.drag_expanded && !self.drag_hover && !self.cursor_inside() {
+                    // opened by a drag, so not the active window: a click elsewhere closes it;
+                    // and in click-to-close mode any click outside the open island does
+                    let watching = self.drag_expanded || self.data.settings.close_on_click;
+                    if self.expanded && watching && !self.drag_hover && !self.menu_hold && !self.cursor_inside() {
                         self.collapse();
                     }
                 }
@@ -3673,6 +4073,11 @@ impl App {
     fn arm_auto_close(&mut self, n: Instant) {
         if self.cursor_inside() {
             self.panel_entered = true;
+            self.collapse_at = None;
+            return;
+        }
+        if self.data.settings.close_on_click && !self.drag_expanded {
+            // stays open until a click outside it (Event::MouseDown, deactivation) or Esc
             self.collapse_at = None;
             return;
         }
@@ -3950,6 +4355,8 @@ impl App {
             hidden: self.user_hidden,
             line_mode: self.data.settings.line_mode,
             screenshots: self.data.settings.screenshots,
+            close_on_click: self.data.settings.close_on_click,
+            mini_lyrics: self.data.settings.mini_lyrics,
             update: self.upd_avail.as_ref().map(|r| r.version.clone()),
             update_busy: self.upd_busy,
         }
@@ -4137,6 +4544,15 @@ impl App {
             self.data.settings.line_mode = !self.data.settings.line_mode;
             self.dirty = true;
             self.kick();
+        } else if cmd == tray::CMD_CLOSE_AUTO || cmd == tray::CMD_CLOSE_CLICK {
+            self.data.settings.close_on_click = cmd == tray::CMD_CLOSE_CLICK;
+            self.dirty = true;
+            if self.expanded && !self.drag_expanded {
+                system::watch_clicks(self.data.settings.close_on_click);
+                self.collapse_at = None;
+            }
+        } else if cmd == tray::CMD_MINI_LYRICS {
+            self.toggle_mini_lyrics();
         } else if cmd == tray::CMD_SHOTS {
             self.data.settings.screenshots = !self.data.settings.screenshots;
             if self.data.settings.screenshots {
