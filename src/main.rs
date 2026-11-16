@@ -9,6 +9,7 @@ mod logo;
 mod lyrics;
 mod media;
 mod player;
+mod privacy;
 mod shelf;
 mod shots;
 mod sound;
@@ -230,6 +231,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 Some(LRESULT(0))
             }
+            WM_HOTKEY => {
+                app.on_hotkey(wp.0 as i32);
+                Some(LRESULT(0))
+            }
             WM_CLIPBOARDUPDATE => {
                 app.on_clipboard();
                 Some(LRESULT(0))
@@ -262,7 +267,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 app.on_activate((wp.0 & 0xFFFF) as u32 != WA_INACTIVE);
                 None
             }
-            WM_KEYDOWN => {
+            // with Alt held, keys come as WM_SYSKEYDOWN (needed to pick an Alt shortcut)
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
                 if app.on_key(wp.0 as u32) {
                     Some(LRESULT(0))
                 } else {

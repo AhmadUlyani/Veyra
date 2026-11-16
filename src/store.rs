@@ -65,11 +65,14 @@ pub struct Settings {
     pub close_on_click: bool,
     /// the closed island shows the current line of the song's synced lyrics
     pub mini_lyrics: bool,
+    /// the mute shortcut the user picked: [modifiers (MOD_ALT 1, MOD_CONTROL 2, MOD_SHIFT 4,
+    /// MOD_WIN 8), virtual key]; none: the first free of Ctrl+Alt+M, Ctrl+Alt+K, Ctrl+Alt+Shift+M
+    pub mic_hotkey: Option<[u32; 2]>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { line_mode: false, screenshots: true, close_on_click: false, mini_lyrics: false }
+        Settings { line_mode: false, screenshots: true, close_on_click: false, mini_lyrics: false, mic_hotkey: None }
     }
 }
 

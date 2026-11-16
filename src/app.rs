@@ -19,7 +19,7 @@ use crate::lyrics::{self, Line};
 use crate::media::{MediaCmd, MediaState};
 use crate::store::{self, Data, Task};
 use crate::util::*;
-use crate::{clip, shelf, shots, sound, system, theme, thumbs, tray, update};
+use crate::{clip, privacy, shelf, shots, sound, system, theme, thumbs, tray, update};
 
 // ------------------------------------------------------------------ style
 
@@ -38,6 +38,15 @@ const RED: C = C::hex(0xFF5C5C);
 const GREEN: C = C::hex(0x4CD787);
 const MEDIA_C: C = C::hex(0xF2F2F7);
 const CLIP_C: C = C::hex(0x5AC8FA);
+const SETTINGS_C: C = C::hex(0xAEAEB2);
+/// the shortcut that mutes / unmutes every microphone: the user's own (Settings), else the first
+/// one free of these (NVIDIA's overlay, for one, can hold Ctrl+Alt+M)
+const HOTKEY_MIC: i32 = 1;
+const MIC_SHORTCUTS: [(u32, u32); 3] = [
+    (MOD_CONTROL.0 | MOD_ALT.0, 'M' as u32),
+    (MOD_CONTROL.0 | MOD_ALT.0, 'K' as u32),
+    (MOD_CONTROL.0 | MOD_ALT.0 | MOD_SHIFT.0, 'M' as u32),
+];
 
 // shelf tiles (DIP); the shelf page is 500 wide with 18 px padding on each side
 const SHELF_TW: f32 = 80.0;
@@ -82,6 +91,8 @@ mod ic {
     pub const DOWNLOAD: char = '\u{E896}';
     pub const LEFT: char = '\u{E76B}';
     pub const RIGHT: char = '\u{E76C}';
+    pub const MIC: char = '\u{E720}';
+    pub const GEAR: char = '\u{E713}';
 }
 
 // ------------------------------------------------------------------ types
@@ -94,8 +105,25 @@ pub enum Tab {
     Shelf,
     Tasks,
     Clipboard,
+    Settings,
 }
-const TABS: [Tab; 6] = [Tab::Media, Tab::Focus, Tab::Water, Tab::Shelf, Tab::Tasks, Tab::Clipboard];
+const TABS: [Tab; 7] = [Tab::Media, Tab::Focus, Tab::Water, Tab::Shelf, Tab::Tasks, Tab::Clipboard, Tab::Settings];
+
+/// The switches on the Settings page.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Opt {
+    MiniLyrics,
+    LineMode,
+    MicMute,
+    Shots,
+    Autostart,
+    /// true: close only on a click outside
+    Close(bool),
+    Theme,
+    Update,
+    /// pick a new mute shortcut (the next keys pressed)
+    Shortcut,
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum ViewKey {
@@ -279,6 +307,7 @@ enum Act {
     ClipCopyAll,
     Toast,
     VolBar(R),
+    Opt(Opt),
 }
 
 pub enum Deferred {
@@ -288,6 +317,8 @@ pub enum Deferred {
 
 enum TIcon {
     G(char),
+    /// microphone crossed out
+    MicOff,
     Txt(String),
     Battery(f32, bool),
     Drop,
@@ -600,6 +631,15 @@ pub struct App {
     art_mode: std::cell::Cell<u8>,
     /// the island's shape as drawn this frame, hover growth included
     shape_r: std::cell::Cell<R>,
+    /// the microphones: muting them, and whether they are muted
+    privacy: privacy::Watcher,
+    mic_muted: Option<bool>,
+    /// the mute shortcut Veyra holds (None: none could be had)
+    hotkey: Option<String>,
+    /// Settings: waiting for the keys of a new mute shortcut
+    hk_capture: bool,
+    /// what happened to the last one picked, shown in its row for a moment (text, good news)
+    hk_msg: Option<(String, bool, Instant)>,
     /// testing aid: a scripted step at a given time (see tick)
     demo_step: Option<(Instant, &'static str)>,
     demo_lyrics: Lyr,
@@ -652,6 +692,8 @@ impl App {
             data.settings.screenshots = true;
             store::save(&data);
         }
+        let privacy = privacy::Watcher::new();
+        let mic_muted = privacy.mic_muted();
         let media_tx = crate::media::spawn();
         let audio = system::Audio::new();
         system::watch_network();
@@ -770,6 +812,11 @@ impl App {
             art_slot: std::cell::Cell::new(None),
             art_mode: std::cell::Cell::new(0),
             shape_r: std::cell::Cell::new(R::default()),
+            privacy,
+            mic_muted,
+            hotkey: None,
+            hk_capture: false,
+            hk_msg: None,
             demo_step: None,
             demo_lyrics: Lyr::None,
             anim_stat_seq: 0,
@@ -785,6 +832,7 @@ impl App {
 
     pub fn start(&mut self) {
         self.set_tick(250);
+        self.register_mic_hotkey();
         if let Ok(v) = std::env::var("VEYRA_DEMO") {
             self.demo_view(&v);
             // testing aid: VEYRA_MOUSE=x,y (window pixels) pretends the cursor rests there, to see hovers
@@ -888,6 +936,17 @@ impl App {
                 self.demo_step = Some((Instant::now() + Duration::from_millis(900), "collapse"));
             }
             // the mouse comes onto the pill (and leaves again) while it shows lyrics
+            "settings" => self.expand(Some(Tab::Settings)),
+            "settingskeys" => {
+                self.expand(Some(Tab::Settings));
+                self.hk_capture = true;
+            }
+            "settingstaken" => {
+                self.expand(Some(Tab::Settings));
+                self.hk_capture = true;
+                self.hk_msg = Some(("Ctrl+Alt+M is taken by another app".into(), false, Instant::now() + Duration::from_secs(60)));
+            }
+            "micoff" => self.toast(TIcon::MicOff, "Microphone off", "", 600.0, RED, None),
             "minihover" => {
                 self.demo_mini();
                 self.demo_step = Some((Instant::now() + Duration::from_millis(900), "hover"));
@@ -1248,6 +1307,7 @@ impl App {
     }
 
     fn collapse(&mut self) {
+        self.cancel_hk_capture();
         self.commit_edit();
         self.shelf_sel.clear();
         self.expanded = false;
@@ -1285,6 +1345,7 @@ impl App {
                 Tab::Shelf => (500.0, 196.0),
                 Tab::Tasks => (500.0, 250.0),
                 Tab::Clipboard => (500.0, 250.0),
+                Tab::Settings => (500.0, 250.0),
             };
             return (w, h, 30.0, ViewKey::Expanded(self.tab, lyr));
         }
@@ -1327,6 +1388,293 @@ impl App {
             v.push(Live::Task);
         }
         (v.first().copied().unwrap_or(Live::Idle), v.get(1).copied())
+    }
+
+    // -------------------------------------------------------------- microphones
+
+    /// Once a second: whether the microphones got muted or unmuted somewhere else (Windows quick
+    /// settings, the keyboard's mic key), for the notice and the Settings switch.
+    fn poll_privacy(&mut self) {
+        if self.demo {
+            return;
+        }
+        let m = self.privacy.mic_muted();
+        if m != self.mic_muted {
+            let was = self.mic_muted;
+            self.mic_muted = m;
+            if let (Some(_), Some(now)) = (was, m) {
+                self.mic_notice(now);
+            }
+            self.kick();
+        }
+    }
+
+    fn mic_notice(&mut self, muted: bool) {
+        if muted {
+            self.toast(TIcon::MicOff, "Microphone off", "", 1.6, RED, None);
+        } else {
+            self.toast(TIcon::G(ic::MIC), "Microphone on", "", 1.6, GREEN, None);
+        }
+    }
+
+    /// Mute or unmute every microphone (the dot, Ctrl+Alt+M, the Settings page).
+    fn toggle_mic(&mut self) {
+        let Some(muted) = self.privacy.mic_muted() else {
+            self.toast(TIcon::G(ic::MIC), "No microphone found", "", 1.8, WHITE, None);
+            return;
+        };
+        let ok = self.privacy.set_mic_muted(!muted);
+        dbg_log(&format!("mic: mute {} -> {} ({})", muted, !muted, if ok { "done" } else { "failed" }));
+        if ok {
+            self.mic_muted = Some(!muted);
+            self.mic_notice(!muted);
+        }
+        self.kick();
+    }
+
+    /// Take the mute shortcut: the user's own if it is free, else the first free default.
+    fn register_mic_hotkey(&mut self) {
+        unsafe {
+            let _ = UnregisterHotKey(self.hwnd, HOTKEY_MIC);
+        }
+        // (demo copies must not take it from the real one)
+        if std::env::var_os("VEYRA_DEMO").is_some() {
+            let (m, vk) = self.data.settings.mic_hotkey.map(|[m, vk]| (m, vk)).unwrap_or(MIC_SHORTCUTS[0]);
+            self.hotkey = Some(hotkey_name(m, vk));
+            return;
+        }
+        let mut own = self.data.settings.mic_hotkey.map(|[m, vk]| (m, vk));
+        if let Some((m, vk)) = own {
+            if hotkey_allowed(m, vk).is_err() {
+                // picked before this check existed (Ctrl+C, say): it would take that key from
+                // every app, so back to the default
+                dbg_log(&format!("hotkey: dropping {}", hotkey_name(m, vk)));
+                self.data.settings.mic_hotkey = None;
+                self.dirty = true;
+                own = None;
+            }
+        }
+        self.hotkey = own.into_iter().chain(MIC_SHORTCUTS).find_map(|(m, vk)| self.try_hotkey(m, vk));
+    }
+
+    fn try_hotkey(&self, mods: u32, vk: u32) -> Option<String> {
+        let name = hotkey_name(mods, vk);
+        match unsafe { RegisterHotKey(self.hwnd, HOTKEY_MIC, HOT_KEY_MODIFIERS(mods) | MOD_NOREPEAT, vk) } {
+            Ok(()) => {
+                dbg_log(&format!("hotkey: {name} registered"));
+                Some(name)
+            }
+            Err(e) => {
+                dbg_log(&format!("hotkey: {name} not registered: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Settings: the next keys pressed become the mute shortcut. The current one is let go
+    /// meanwhile, so pressing it again can pick it (instead of muting).
+    fn start_hk_capture(&mut self) {
+        self.hk_capture = true;
+        self.hk_msg = None;
+        unsafe {
+            let _ = UnregisterHotKey(self.hwnd, HOTKEY_MIC);
+        }
+        self.kick();
+    }
+
+    fn cancel_hk_capture(&mut self) {
+        if self.hk_capture {
+            self.hk_capture = false;
+            self.register_mic_hotkey();
+            self.kick();
+        }
+    }
+
+    fn hk_message(&mut self, text: String, good: bool) {
+        self.hk_msg = Some((text, good, Instant::now()));
+    }
+
+    /// A key while picking a shortcut: Esc cancels, Backspace / Delete go back to the default,
+    /// a key with Ctrl, Alt or Win held becomes the shortcut if no other app owns it.
+    fn hk_key(&mut self, vk: u32) {
+        let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(k.0 as i32) } < 0;
+        if vk == VK_ESCAPE.0 as u32 {
+            self.cancel_hk_capture();
+            return;
+        }
+        // the modifiers on their own: wait for the key that goes with them
+        if [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN, VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_CAPITAL]
+            .iter()
+            .any(|k| k.0 as u32 == vk)
+        {
+            return;
+        }
+        let mut mods = 0;
+        if down(VK_CONTROL) {
+            mods |= MOD_CONTROL.0;
+        }
+        if down(VK_MENU) {
+            mods |= MOD_ALT.0;
+        }
+        if down(VK_SHIFT) {
+            mods |= MOD_SHIFT.0;
+        }
+        if down(VK_LWIN) || down(VK_RWIN) {
+            mods |= MOD_WIN.0;
+        }
+        if mods == 0 && (vk == VK_BACK.0 as u32 || vk == VK_DELETE.0 as u32) {
+            self.data.settings.mic_hotkey = None;
+            self.dirty = true;
+            self.hk_capture = false;
+            self.register_mic_hotkey();
+            let name = self.hotkey.clone().unwrap_or_default();
+            self.hk_message(format!("Back to {name}"), true);
+            self.kick();
+            return;
+        }
+        let name = hotkey_name(mods, vk);
+        if let Err(why) = hotkey_allowed(mods, vk) {
+            // still picking: try another
+            self.hk_message(why.replace("{}", &name), false);
+            self.kick();
+            return;
+        }
+        if self.demo {
+            self.data.settings.mic_hotkey = Some([mods, vk]);
+            self.hotkey = Some(name.clone());
+            self.hk_capture = false;
+            self.hk_message(format!("{name} is set"), true);
+        } else if let Some(n) = self.try_hotkey(mods, vk) {
+            self.data.settings.mic_hotkey = Some([mods, vk]);
+            self.dirty = true;
+            self.hotkey = Some(n);
+            self.hk_capture = false;
+            self.hk_message(format!("{name} is set"), true);
+        } else {
+            // still picking: try another
+            self.hk_message(format!("{name} is taken by another app"), false);
+        }
+        self.kick();
+    }
+
+    pub fn on_hotkey(&mut self, id: i32) {
+        dbg_log(&format!("hotkey: {id}"));
+        if id == HOTKEY_MIC {
+            self.toggle_mic();
+        }
+    }
+
+    // -------------------------------------------------------------- settings
+
+    fn set_opt(&mut self, o: Opt) {
+        match o {
+            Opt::MiniLyrics => self.toggle_mini_lyrics(),
+            Opt::LineMode => self.tray_cmd(tray::CMD_LINE),
+            Opt::MicMute => self.toggle_mic(),
+            Opt::Shots => self.tray_cmd(tray::CMD_SHOTS),
+            Opt::Autostart => self.tray_cmd(tray::CMD_AUTOSTART),
+            Opt::Close(click) => self.tray_cmd(if click { tray::CMD_CLOSE_CLICK } else { tray::CMD_CLOSE_AUTO }),
+            Opt::Theme => self.tray_cmd(tray::CMD_THEME),
+            Opt::Update => self.tray_cmd(tray::CMD_UPDATE),
+            Opt::Shortcut => {
+                if self.hk_capture {
+                    self.cancel_hk_capture();
+                } else {
+                    self.start_hk_capture();
+                }
+            }
+        }
+        self.kick();
+    }
+
+    /// Every switch that used to be in the right-click menu, in two columns.
+    fn draw_settings(&self, g: &Gfx, ui: &mut Ui, c: R) {
+        let s = &self.data.settings;
+        let gap = 16.0;
+        let cw = (c.w - gap) / 2.0;
+        let rh = 30.0;
+        let (lx, rx) = (c.x, c.x + cw + gap);
+        let row = |i: usize| c.y - 4.0 + i as f32 * (rh + 2.0);
+        let mic = self.mic_muted;
+        let left: [(&str, Option<bool>, Opt, C); 3] = [
+            ("Lyrics in the closed island", Some(s.mini_lyrics), Opt::MiniLyrics, GREEN),
+            ("Shrink to a line until hovered", Some(s.line_mode), Opt::LineMode, GREEN),
+            ("Mute all microphones", mic, Opt::MicMute, RED),
+        ];
+        for (i, (label, on, opt, col)) in left.iter().enumerate() {
+            setting_row(g, ui, R::new(lx, row(i), cw, rh), label, *on, *opt, *col);
+        }
+        let right: [(&str, Option<bool>, Opt, C); 2] = [
+            ("Add screenshots to Shelf", Some(s.screenshots), Opt::Shots, GREEN),
+            ("Start with Windows", Some(self.autostart), Opt::Autostart, GREEN),
+        ];
+        for (i, (label, on, opt, col)) in right.iter().enumerate() {
+            setting_row(g, ui, R::new(rx, row(i), cw, rh), label, *on, *opt, *col);
+        }
+        // how the open island closes: two choices side by side
+        {
+            let r = R::new(rx, row(2), cw, rh);
+            g.text("Close", R::new(r.x + 8.0, r.y, 40.0, r.h), 12.5, 500, WHITE.a(0.9), Al::L);
+            let sw = (r.w - 52.0) / 2.0;
+            for (k, (label, click)) in [("Mouse leaves", false), ("Click outside", true)].into_iter().enumerate() {
+                let b = R::new(r.x + 48.0 + k as f32 * (sw + 4.0), r.y + 3.0, sw - 4.0, r.h - 6.0);
+                let on = s.close_on_click == click;
+                let hv = ui.hit(b, Act::Opt(Opt::Close(click)));
+                g.rrect(b, b.h / 2.0, if on { surf_active(g) } else { surf(g, hv) });
+                g.text(label, b, 11.5, if on { 600 } else { 500 }, if on { WHITE } else { T2 }, Al::C);
+            }
+        }
+        // the mute shortcut
+        {
+            // the button shows the shortcut; click it, then press the new keys
+            // across both columns: room for the hint and the message beside the button
+            let r = R::new(lx, row(3), c.w, rh);
+            let cap = self.hk_capture;
+            let val = if cap {
+                "Press keys…".to_string()
+            } else {
+                self.hotkey.clone().unwrap_or_else(|| "None free".into())
+            };
+            let bw = g.measure(&val, 12.0, 600) + 22.0;
+            let b = R::new(r.right() - bw - 2.0, r.y + 3.0, bw, r.h - 6.0);
+            let hv = ui.hit(b, Act::Opt(Opt::Shortcut));
+            if cap {
+                pill_btn(g, ui, b, &val, accent_fg(g), accent_btn(g, SETTINGS_C), Act::Opt(Opt::Shortcut));
+            } else {
+                pill_btn(g, ui, b, &val, btn_fg(g, WHITE), surf(g, hv), Act::Opt(Opt::Shortcut));
+            }
+            // left of it: the label, a hint while picking, or what came of the last pick
+            let lr = R::new(r.x + 8.0, r.y, b.x - r.x - 14.0, r.h);
+            let msg = self.hk_msg.as_ref().filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3));
+            if let Some((t, good, _)) = msg {
+                g.text(t, lr, 11.5, 600, if *good { GREEN } else { RED }, Al::L);
+            } else if cap {
+                g.text("Two of Ctrl, Alt, Shift, Win + a key · Esc cancels · ⌫ default", lr, 11.5, 500, T2, Al::L);
+            } else {
+                g.text("Mute shortcut", lr, 12.5, 500, WHITE.a(0.9), Al::L);
+            }
+        }
+        // bottom: version, theme file, updates
+        let by = row(4) + 8.0;
+        g.text(&format!("Veyra {}", update::CURRENT), R::new(lx + 8.0, by, 120.0, 28.0), 12.0, 500, T3, Al::L);
+        let upd = match (&self.upd_avail, self.upd_busy) {
+            (_, true) => "Updating…".to_string(),
+            (Some(r), false) => format!("Update to v{}", r.version),
+            (None, false) => "Check for updates".to_string(),
+        };
+        let uw = g.measure(&upd, 12.0, 600) + 28.0;
+        let ub = R::new(c.right() - uw, by, uw, 28.0);
+        let hv = ui.hover(ub);
+        if self.upd_avail.is_some() {
+            pill_btn(g, ui, ub, &upd, accent_fg(g), accent_btn(g, GREEN), Act::Opt(Opt::Update));
+        } else {
+            pill_btn(g, ui, ub, &upd, btn_fg(g, WHITE), surf(g, hv), Act::Opt(Opt::Update));
+        }
+        let tl = "UI colors…";
+        let tw = g.measure(tl, 12.0, 600) + 28.0;
+        let tb = R::new(ub.x - 8.0 - tw, by, tw, 28.0);
+        let hv = ui.hover(tb);
+        pill_btn(g, ui, tb, tl, btn_fg(g, WHITE), surf(g, hv), Act::Opt(Opt::Theme));
     }
 
     /// Mini lyrics are on and this track's synced lyrics are here.
@@ -2090,6 +2438,7 @@ impl App {
     fn draw_ticon(&self, g: &Gfx, icon: &TIcon, r: R, acc: C) {
         match icon {
             TIcon::G(ch) => g.icon(*ch, r, 17.0, acc),
+            TIcon::MicOff => draw_mic_off(g, r, 15.0, acc),
             TIcon::Txt(s) => g.text(s, r, 16.0, 700, acc, Al::C),
             TIcon::Battery(f, ch) => draw_battery(g, r.cx() - 12.0, r.cy(), 22.0, 12.0, *f, *ch),
             TIcon::Drop => {
@@ -2137,6 +2486,7 @@ impl App {
         let ir = R::new(cx - rad, c.cy() - rad, TWO_ICON, TWO_ICON);
         match &t.icon {
             TIcon::G(ch) => g.icon(*ch, ir, 14.0, t.accent),
+            TIcon::MicOff => draw_mic_off(g, ir, 13.0, t.accent),
             TIcon::Txt(s) => g.text(s, ir, 12.5, 700, t.accent, Al::C),
             TIcon::Battery(f, ch) => draw_battery(g, ir.cx() - 10.0, ir.cy(), 18.0, 10.0, *f, *ch),
             TIcon::Drop => {
@@ -2158,7 +2508,7 @@ impl App {
         let inner = R::new(c.x + 18.0, c.y + 12.0, c.w - 36.0, c.h - 26.0);
         // tab bar
         for (i, t) in TABS.iter().enumerate() {
-            let b = R::new(inner.x + i as f32 * 38.0, inner.y, 34.0, 28.0);
+            let b = R::new(inner.x + i as f32 * 36.0, inner.y, 32.0, 28.0);
             let hv = ui.hit(b, Act::Tab(*t));
             let active = *t == tab;
             if active {
@@ -2176,9 +2526,11 @@ impl App {
         let cw = g.measure_clock(&clock, 13.5, 600);
         g.clock(&clock, R::new(x - cw - 2.0, inner.y, cw + 2.0, 28.0), 13.5, 600, WHITE, Al::R);
         x -= cw + 10.0;
-        let date = n.date_label();
-        let dw = g.measure(&date, 12.0, 500);
-        g.text(&date, R::new(x - dw - 2.0, inner.y, dw + 2.0, 28.0), 12.0, 500, T2, Al::R);
+        // without the year: room for the seventh tab
+        let full_date = n.date_label();
+        let date = full_date.rsplit_once(' ').map(|(d, _)| d).unwrap_or(&full_date);
+        let dw = g.measure(date, 12.0, 500);
+        g.text(date, R::new(x - dw - 2.0, inner.y, dw + 2.0, 28.0), 12.0, 500, T2, Al::R);
         x -= dw + 16.0;
         if let Some((ac, pct)) = self.power {
             g.text(&format!("{pct}%"), R::new(x - 36.0, inner.y, 36.0, 28.0), 12.0, 500, T3, Al::R);
@@ -2219,6 +2571,7 @@ impl App {
             Tab::Shelf => self.draw_shelf(g, ui, body),
             Tab::Tasks => self.draw_tasks(g, ui, body),
             Tab::Clipboard => self.draw_clipboard(g, ui, body),
+            Tab::Settings => self.draw_settings(g, ui, body),
         }
     }
 
@@ -3169,6 +3522,9 @@ impl App {
         }
         match a {
             Act::Tab(t) => {
+                if t != Tab::Settings {
+                    self.cancel_hk_capture();
+                }
                 self.shelf_sel.clear();
                 self.tab = t;
                 if t == Tab::Media && self.lyrics_open {
@@ -3206,6 +3562,7 @@ impl App {
                 }
             }
             Act::MiniLyrics => self.toggle_mini_lyrics(),
+            Act::Opt(o) => self.set_opt(o),
             Act::LyricLine(t) => {
                 if let Some(m) = &mut self.media {
                     m.pos = t;
@@ -3739,6 +4096,7 @@ impl App {
     fn per_second(&mut self) {
         // hide during full-screen apps / presentations; reminders wait until it is back
         self.apply_visibility();
+        self.poll_privacy();
         let t = now();
         let today = t.date();
         if self.data.water.date != today {
@@ -4278,6 +4636,10 @@ impl App {
     }
 
     pub fn on_key(&mut self, vk: u32) -> bool {
+        if self.hk_capture && self.expanded && self.tab == Tab::Settings {
+            self.hk_key(vk);
+            return true;
+        }
         if vk == VK_ESCAPE.0 as u32 {
             if self.edit.is_some() {
                 self.edit = None;
@@ -4370,12 +4732,7 @@ impl App {
 
     pub fn menu_state(&self) -> tray::MenuState {
         tray::MenuState {
-            autostart: self.autostart,
             hidden: self.user_hidden,
-            line_mode: self.data.settings.line_mode,
-            screenshots: self.data.settings.screenshots,
-            close_on_click: self.data.settings.close_on_click,
-            mini_lyrics: self.data.settings.mini_lyrics,
             update: self.upd_avail.as_ref().map(|r| r.version.clone()),
             update_busy: self.upd_busy,
         }
@@ -4572,6 +4929,12 @@ impl App {
             }
         } else if cmd == tray::CMD_MINI_LYRICS {
             self.toggle_mini_lyrics();
+        } else if cmd == tray::CMD_SETTINGS {
+            self.user_hidden = false;
+            self.apply_visibility();
+            if !self.hidden {
+                self.expand(Some(Tab::Settings));
+            }
         } else if cmd == tray::CMD_SHOTS {
             self.data.settings.screenshots = !self.data.settings.screenshots;
             if self.data.settings.screenshots {
@@ -4681,6 +5044,7 @@ fn tab_color(g: &Gfx, t: Tab) -> C {
         Tab::Shelf => SHELF_C,
         Tab::Tasks => TASK_C,
         Tab::Clipboard => CLIP_C,
+        Tab::Settings => SETTINGS_C,
     }
 }
 
@@ -4696,7 +5060,82 @@ fn draw_tab_icon(g: &Gfx, t: Tab, r: R, col: C) {
         Tab::Shelf => g.icon(ic::FOLDER, r, 14.0, col),
         Tab::Tasks => g.icon(ic::TASKS, r, 14.0, col),
         Tab::Clipboard => g.icon(ic::CLIP, r, 14.0, col),
+        Tab::Settings => g.icon(ic::GEAR, r, 14.0, col),
     }
+}
+
+/// Whether a key combination may become the mute shortcut. A global shortcut takes its keys
+/// from every app, so: two modifiers at least (one Ctrl or Alt plus a letter is nearly always
+/// some app's: copy, paste, save, menus), and none of the keys Windows itself or text editing
+/// lives on. The error says why, with `{}` for the shortcut's name.
+fn hotkey_allowed(mods: u32, vk: u32) -> Result<(), &'static str> {
+    let (ctrl, alt, shift, win) = (mods & MOD_CONTROL.0 != 0, mods & MOD_ALT.0 != 0, mods & MOD_SHIFT.0 != 0, mods & MOD_WIN.0 != 0);
+    if [ctrl, alt, shift, win].iter().filter(|b| **b).count() < 2 {
+        return Err("Use two of Ctrl, Alt, Shift, Win");
+    }
+    let k = |v: VIRTUAL_KEY| v.0 as u32 == vk;
+    // switching windows and tabs, Task Manager, typing and moving around in text
+    let editing = [VK_TAB, VK_ESCAPE, VK_RETURN, VK_BACK, VK_DELETE, VK_INSERT, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END, VK_PRIOR, VK_NEXT];
+    if editing.iter().any(|v| k(*v)) {
+        return Err("{} is used by Windows or for typing");
+    }
+    // Win+Shift+S: screen snip; Win+Ctrl+D / F4: new / close virtual desktop
+    if win && ((shift && vk == 'S' as u32) || (ctrl && (vk == 'D' as u32 || k(VK_F4)))) {
+        return Err("{} is used by Windows");
+    }
+    Ok(())
+}
+
+/// "Ctrl+Alt+M", "Ctrl+Shift+F9", "Win+Alt+Space": a shortcut as the Settings page shows it.
+fn hotkey_name(mods: u32, vk: u32) -> String {
+    let mut s = String::new();
+    for (bit, name) in [(MOD_CONTROL.0, "Ctrl"), (MOD_ALT.0, "Alt"), (MOD_SHIFT.0, "Shift"), (MOD_WIN.0, "Win")] {
+        if mods & bit != 0 {
+            s.push_str(name);
+            s.push('+');
+        }
+    }
+    let key = match vk {
+        0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk).map(|c| c.to_string()).unwrap_or_default(),
+        0x70..=0x87 => format!("F{}", vk - 0x6F),
+        _ => unsafe {
+            // the keyboard's own name for it ("Space", "Page Up", "Num 5"); extended keys need
+            // bit 24, or the arrows come out as the number pad's
+            let sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+            let ext = matches!(vk, 0x21..=0x2E | 0x5B..=0x5D | 0x6F | 0x90);
+            let lp = ((sc as i32) << 16) | if ext { 1 << 24 } else { 0 };
+            let mut buf = [0u16; 64];
+            let n = GetKeyNameTextW(lp, &mut buf);
+            if n > 0 {
+                String::from_utf16_lossy(&buf[..n as usize])
+            } else {
+                format!("Key {vk}")
+            }
+        },
+    };
+    s + &key
+}
+
+/// A microphone with a line through it.
+fn draw_mic_off(g: &Gfx, r: R, size: f32, col: C) {
+    g.icon(ic::MIC, r, size, col);
+    let h = size * 0.62;
+    g.line(r.cx() - h, r.cy() - h, r.cx() + h, r.cy() + h, 1.6, col);
+}
+
+/// One switch on the Settings page; `on: None` greys it out (nothing to switch).
+fn setting_row(g: &Gfx, ui: &mut Ui, r: R, label: &str, on: Option<bool>, opt: Opt, col: C) {
+    let hv = on.is_some() && ui.hit(r, Act::Opt(opt));
+    if hv {
+        g.rrect(r, 10.0, surf(g, false));
+    }
+    let fg = if on.is_some() { WHITE.a(0.9) } else { T3 };
+    g.text(label, R::new(r.x + 8.0, r.y, r.w - 56.0, r.h), 12.5, 500, fg, Al::L);
+    let track = R::new(r.right() - 40.0, r.cy() - 8.0, 30.0, 16.0);
+    let state = on.unwrap_or(false);
+    g.rrect(track, 8.0, if state { accent_btn(g, col) } else { WHITE.a(if on.is_some() { 0.22 } else { 0.1 }) });
+    let kx = if state { track.right() - 8.0 } else { track.x + 8.0 };
+    g.circle(kx, track.cy(), 6.0, if state { accent_fg(g) } else { WHITE.a(if on.is_some() { 0.9 } else { 0.35 }) });
 }
 
 fn draw_battery(g: &Gfx, x: f32, cy: f32, w: f32, h: f32, f: f32, charging: bool) {
@@ -4987,7 +5426,8 @@ pub fn dbg_log(s: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{left_label, parse_amount, parse_due, parse_due_on, passed_alerts, reminder_due};
+    use super::{hotkey_allowed, hotkey_name, left_label, parse_amount, parse_due, parse_due_on, passed_alerts, reminder_due};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 
     // 2026-11-03 20:00:00 in the naive-local epoch used by the app
     const NOW: i64 = 20760 * 86400 + 20 * 3600;
@@ -5057,6 +5497,33 @@ mod tests {
         assert_eq!(left_label(3600), "in 1 hour");
         assert_eq!(left_label(1800), "in 30 minutes");
         assert_eq!(left_label(40 * 60), "in 40 minutes");
+    }
+
+    #[test]
+    fn shortcut_rules() {
+        let ctrl = MOD_CONTROL.0;
+        let (alt, shift, win) = (MOD_ALT.0, MOD_SHIFT.0, MOD_WIN.0);
+        // everyday app shortcuts
+        assert!(hotkey_allowed(ctrl, 'C' as u32).is_err());
+        assert!(hotkey_allowed(ctrl, 'V' as u32).is_err());
+        assert!(hotkey_allowed(alt, 'F' as u32).is_err());
+        assert!(hotkey_allowed(alt, 0x73).is_err()); // Alt+F4
+        // Windows and text editing, even with two modifiers
+        assert!(hotkey_allowed(ctrl | shift, 0x1B).is_err()); // Task Manager
+        assert!(hotkey_allowed(ctrl | shift, 0x09).is_err()); // previous tab
+        assert!(hotkey_allowed(ctrl | shift, 0x25).is_err()); // select a word
+        assert!(hotkey_allowed(win | shift, 'S' as u32).is_err());
+        // fine
+        assert!(hotkey_allowed(ctrl | alt, 'M' as u32).is_ok());
+        assert!(hotkey_allowed(ctrl | shift, 0x78).is_ok()); // Ctrl+Shift+F9
+        assert!(hotkey_allowed(win | alt, 'M' as u32).is_ok());
+    }
+
+    #[test]
+    fn shortcut_names() {
+        assert_eq!(hotkey_name(MOD_CONTROL.0 | MOD_ALT.0, 'M' as u32), "Ctrl+Alt+M");
+        assert_eq!(hotkey_name(MOD_CONTROL.0 | MOD_SHIFT.0, 0x78), "Ctrl+Shift+F9");
+        assert_eq!(hotkey_name(MOD_WIN.0 | MOD_ALT.0, '5' as u32), "Alt+Win+5");
     }
 
     #[test]

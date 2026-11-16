@@ -10,31 +10,38 @@ display's refresh rate (60/120/144/165 Hz…) by waiting for vertical blank. The
 | Tab | What it does |
 | --- | --- |
 | Music | Shows what's playing in any player that reports to Windows media controls (Spotify, Apple Music, browsers/YouTube, …). Play/pause, previous/next, click the bar to seek. Scroll on the island to change volume. |
-| Lyrics | The speech-bubble button splits the island: live synced lyrics from [lrclib.net](https://lrclib.net). Click a line to jump to it. The button next to it (a small notch over two lines) puts the current line in the closed island instead of the clock, so you can follow the lyrics while working in another app. The pill keeps one width for the whole song and the next line slides up into place. Also in the menu as **Lyrics in the closed island**. |
+| Lyrics | The speech-bubble button splits the island: live synced lyrics from [lrclib.net](https://lrclib.net). Click a line to jump to it. The button next to it (a small notch over two lines) puts the current line in the closed island instead of the clock, so you can follow the lyrics while working in another app. The pill keeps one width for the whole song and the next line slides up into place. Also in Settings as **Lyrics in the closed island**. |
 | Focus | Pomodoro timer (default 25/5), countdown in the compact pill, soft chime when a phase ends. |
 | Water | Bottle size, daily goal, reminder interval. Reminders run 07:00–23:00 until you reach the goal; switch them off with the Reminders toggle. |
-| Shelf | Drag files onto the island to keep them, drag them back out into chats, emails or folders. Images show a small preview. Click a file to open it. With many files, scroll to slide through them. New screenshots (saved in Pictures\Screenshots by Win+PrtScn or the Snipping Tool) are added automatically; switch that off in the tray menu. |
+| Shelf | Drag files onto the island to keep them, drag them back out into chats, emails or folders. Images show a small preview. Click a file to open it. With many files, scroll to slide through them. New screenshots (saved in Pictures\Screenshots by Win+PrtScn or the Snipping Tool) are added automatically; switch that off in Settings. |
 | Tasks | A month calendar next to the tasks of the day you pick. Days with tasks get a dot (red: overdue). Pick a day, type a task and set a time (− / + or the mouse wheel, ±15 / ±5 min; a later day starts at 09:00), then press Enter. Scroll over the calendar to change month, click the month name to jump back to today. Today also lists tasks without a time and unfinished ones from earlier days. Reminders come 1 day, 6 hours, 3 hours, 1 hour and 30 minutes before the deadline, and when it is due. While a full-screen app is in front they stay quiet and show once it is gone. |
 | Clipboard | The last 30 pieces of text you copied, newest first. Click one to copy it again (it keeps its place), or remove it with ✕. **Copy all** copies every entry at once, oldest first, one per line. Text dragged onto the island (from a browser or an editor) is added here too, without touching what is on the Windows clipboard. Kept in memory only, so the list is gone when Veyra closes, and copies that apps mark as private (password managers) are skipped. Text only, no images. |
+| Settings | The gear tab: every switch in one place (lyrics in the closed island, shrink to a line, mute all microphones, screenshots to Shelf, start with Windows, how the open island closes), plus **UI colors…** and **Check for updates**. |
 
 System notices: volume and brightness HUD, Caps Lock, keyboard language changes,
-charger plugged/unplugged, low battery, Wi-Fi connected or lost, audio output/headphones changed, text copied.
+charger plugged/unplugged, low battery, Wi-Fi connected or lost, audio output/headphones changed, text copied,
+microphone muted / unmuted.
 The island hides itself while a full-screen app or presentation is running.
 
+**Microphone:** `Ctrl+Alt+M` mutes every microphone at once, and unmutes them again, from anywhere (when another
+app already owns it, Veyra takes `Ctrl+Alt+K`, else `Ctrl+Alt+Shift+M`; Settings shows which, and lets you pick your own: click the shortcut, then press the keys, with two of Ctrl, Alt, Shift,
+Win held (keys Windows or typing use, like Tab, Esc or the arrows, are refused); Esc cancels, Backspace goes back to the default). A "Microphone off"
+or "Microphone on" notice confirms it, also when they are muted elsewhere (Windows quick settings, a mic key).
+The **Mute all microphones** switch in Settings does the same.
+
 On the first run after installing, **Start with Windows** and **Add screenshots to Shelf** are on.
-Both can be switched off in the menu, and stay off after that.
+Both can be switched off in Settings, and stay off after that.
 
 ## Usage
 
 * Click the pill to expand it (buttons react when the mouse button is released, so holding it down does nothing).
   It collapses by itself shortly after the mouse leaves it, or with `Esc` or a click outside; clicks inside
   the island never close it. It stays open while you type in a field or hold the mouse button.
-  To keep it open until you click outside it, pick **Close the open island → Only by clicking outside it**
-  in the menu (back with **Automatically when the mouse leaves**). `Esc` closes it either way.
+  To keep it open until you click outside it, set **Close** to **Click outside** in Settings (back with
+  **Mouse leaves**). `Esc` closes it either way.
 * A task or clipboard entry too long for its row ends in "…"; hold the mouse over it and the text slides to show the rest.
-* Right-click the island or the tray icon for **Hide / Show Veyra**, **Shrink to a line until hovered**,
-  **Lyrics in the closed island**, **Close the open island**,
-  **Add screenshots to Shelf**, **Start with Windows** and **Quit**.
+* Right-click the island or the tray icon for **Hide / Show Veyra**, **Settings...** (opens the Settings tab),
+  the update item and **Quit**.
   Left-click the tray icon to bring a hidden island back.
 * **Shrink to a line until hovered** (off by default): the closed island becomes a thin line at the top of the
   screen. Move the mouse onto the line, or within about 1 cm of it, and the normal pill comes back.
@@ -57,7 +64,7 @@ Publishing a release: bump `version` in `Cargo.toml`, build, and create a GitHub
 
 ## UI colors
 
-Right-click the island or the tray icon → **UI colors (theme.conf)...** opens `%APPDATA%\Veyra\theme.conf`
+Settings tab → **UI colors…** opens `%APPDATA%\Veyra\theme.conf`
 in Notepad. Save it and Veyra applies the change within a second. Lines starting with `#` are comments.
 
 ```ini
