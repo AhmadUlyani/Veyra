@@ -887,6 +887,11 @@ impl App {
                 self.expand(Some(Tab::Media));
                 self.demo_step = Some((Instant::now() + Duration::from_millis(900), "collapse"));
             }
+            // the mouse comes onto the pill (and leaves again) while it shows lyrics
+            "minihover" => {
+                self.demo_mini();
+                self.demo_step = Some((Instant::now() + Duration::from_millis(900), "hover"));
+            }
             "miniexpand" => {
                 self.demo_mini();
                 self.demo_step = Some((Instant::now() + Duration::from_millis(900), "expand"));
@@ -1786,14 +1791,11 @@ impl App {
             (w, h)
         });
         // Hovered, the pill grows a little taller: its content moves down by half of that, so it
-        // stays in the middle (whole pixels once the hover is at rest, so the text stays sharp)
+        // stays in the middle. It glides (no whole-pixel steps on the way) straight to the whole-
+        // pixel offset it rests at, so nothing hops once the hover settles and the text at rest
+        // stays sharp (rounding only at the end moved it half a pixel late at 125 % scaling)
         let hov_dy = if matches!(self.view, ViewKey::Compact(_)) {
-            let d = HOVER_H * self.hov / 2.0;
-            if self.hov <= 0.0 || self.hov >= 1.0 {
-                px(d)
-            } else {
-                d
-            }
+            px(HOVER_H / 2.0) * self.hov.clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -1806,7 +1808,10 @@ impl App {
             }
             // the shape's width (hover) moves its center by a pixel now and then: not the content
             ViewKey::Compact(_) if self.data.settings.line_mode => R::new(px(self.screen_cx - tw / 2.0), isl.y + drop_y + hov_dy, tw, th),
-            ViewKey::Compact(_) => R::new(isl.cx() - tw / 2.0, isl.y + hov_dy, tw, th),
+            // centered on the screen, not on the shape: the shape grows by whole pixels, so its
+            // center wobbles by half a pixel from frame to frame while hovering, and the content
+            // would shake with it
+            ViewKey::Compact(_) => R::new(px(self.screen_cx - tw / 2.0), isl.y + hov_dy, tw, th),
             _ => R::new(isl.cx() - tw / 2.0, isl.y, tw, th),
         };
         // Open and at rest, the content sits inside the shape clear of its rounded corners, so a
@@ -1842,6 +1847,8 @@ impl App {
         } else {
             g.push_rr(shape, rad, alpha.max(0.0));
         }
+        // the closed pill's text glides with the hover instead of hopping row by row
+        g.set_no_snap(matches!(self.view, ViewKey::Compact(_) | ViewKey::Line));
         match self.view {
             ViewKey::Compact(live) => self.draw_compact(g, ui, c, live),
             ViewKey::Line => self.draw_compact(g, ui, c, self.lives().0),
@@ -1853,6 +1860,7 @@ impl App {
             ViewKey::Expanded(tab, lyr) => self.draw_expanded(g, ui, c, tab, lyr),
         }
         g.pop();
+        g.set_no_snap(false);
         self.art_mode.set(0);
         if let (Some(m), Some((to, to_rad))) = (morph, self.art_slot.get()) {
             // the artwork, fully visible the whole way, from where it was to where it goes
@@ -1901,7 +1909,9 @@ impl App {
         if f > 0.0 {
             let s = self.shape_r.get();
             let sc = self.gfx.scale;
-            let t = ((2.0 + self.hov) * sc).round() / sc;
+            // gliding between two whole-pixel thicknesses, not jumping a pixel half way
+            let px = |v: f32| (v * sc).round() / sc;
+            let t = px(2.0) + (px(3.0) - px(2.0)) * self.hov.clamp(0.0, 1.0);
             g.rect(R::new(s.x, s.bottom() - t, s.w * f.clamp(0.0, 1.0), t), col);
         }
     }
@@ -3602,6 +3612,15 @@ impl App {
                     "found" => self.lyr = std::mem::replace(&mut self.demo_lyrics, Lyr::None),
                     "collapse" => self.collapse(),
                     "expand" => self.expand(Some(Tab::Media)),
+                    "hover" => {
+                        self.mouse = Some((self.screen_cx, 12.0));
+                        self.hover_in = Some(n);
+                        self.demo_step = Some((n + Duration::from_millis(700), "unhover"));
+                    }
+                    "unhover" => {
+                        self.mouse = None;
+                        self.hover_out = Some(n);
+                    }
                     _ => {}
                 }
                 self.kick();

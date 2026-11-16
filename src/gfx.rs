@@ -73,6 +73,8 @@ pub struct Gfx {
     bg_grad: [Option<ID2D1LinearGradientBrush>; 2],
     /// how far the open colors are faded in (0 = closed colors, 1 = open colors)
     open: Cell<f32>,
+    /// text is placed exactly where asked instead of on the nearest pixel row (see set_no_snap)
+    no_snap: Cell<bool>,
     /// replaces pure white (text, icons, translucent surfaces) so light themes stay readable
     fg: Cell<C>,
     /// current `text_contrast` (blended between closed and open)
@@ -167,6 +169,7 @@ impl Gfx {
                 bg_solid: [Cell::new(BLACK), Cell::new(BLACK)],
                 bg_grad: [None, None],
                 open: Cell::new(0.0),
+                no_snap: Cell::new(false),
                 contrast: Cell::new(0.0),
                 bg_luma: Cell::new(0.0),
                 fg: Cell::new(WHITE),
@@ -650,6 +653,12 @@ impl Gfx {
         }
     }
 
+    /// Text that moves by fractions of a pixel (the pill growing on hover) glides only when it is
+    /// not snapped to pixel rows; snapped, it hops a whole pixel now and then.
+    pub fn set_no_snap(&self, on: bool) {
+        self.no_snap.set(on);
+    }
+
     fn draw_text(&self, s: &str, r: R, f: &IDWriteTextFormat, c: C) {
         self.draw_text_raw(s, r, f, self.text_alpha(c));
     }
@@ -666,7 +675,12 @@ impl Gfx {
         let c = self.legible(c);
         let w: Vec<u16> = s.encode_utf16().collect();
         unsafe {
-            self.rt.DrawText(&w, f, &r.d2d(), self.b(c), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            let opts = if self.no_snap.get() {
+                D2D1_DRAW_TEXT_OPTIONS(D2D1_DRAW_TEXT_OPTIONS_CLIP.0 | D2D1_DRAW_TEXT_OPTIONS_NO_SNAP.0)
+            } else {
+                D2D1_DRAW_TEXT_OPTIONS_CLIP
+            };
+            self.rt.DrawText(&w, f, &r.d2d(), self.b(c), opts, DWRITE_MEASURING_MODE_NATURAL);
         }
     }
 
