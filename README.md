@@ -16,7 +16,7 @@ display's refresh rate (60/120/144/165 Hz…) by waiting for vertical blank. The
 | Shelf | Drag files onto the island to keep them, drag them back out into chats, emails or folders. Images show a small preview. Click a file to open it. With many files, scroll to slide through them. New screenshots (saved in Pictures\Screenshots by Win+PrtScn or the Snipping Tool) are added automatically; switch that off in Settings. |
 | Tasks | A month calendar next to the tasks of the day you pick. Days with tasks get a dot (red: overdue). Pick a day, type a task and set a time (− / + or the mouse wheel, ±15 / ±5 min; a later day starts at 09:00), then press Enter. Scroll over the calendar to change month, click the month name to jump back to today. Today also lists tasks without a time and unfinished ones from earlier days. Reminders come 1 day, 6 hours, 3 hours, 1 hour and 30 minutes before the deadline, and when it is due. While a full-screen app is in front they stay quiet and show once it is gone. |
 | Clipboard | The last 30 pieces of text you copied, newest first. Click one to copy it again (it keeps its place), or remove it with ✕. **Copy all** copies every entry at once, oldest first, one per line. Text dragged onto the island (from a browser or an editor) is added here too, without touching what is on the Windows clipboard. Kept in memory only, so the list is gone when Veyra closes, and copies that apps mark as private (password managers) are skipped. Text only, no images. |
-| Settings | The gear tab: every switch in one place (lyrics in the closed island, shrink to a line, mute all microphones, screenshots to Shelf, start with Windows, how the open island closes), plus **UI colors…** and **Check for updates**. |
+| Settings | The gear tab, laid out like Windows Settings: categories on the left (**General**: start with Windows, shrink to a line, how the open island closes · **Music**: lyrics in the closed island · **Microphone**: mute all microphones, the mute shortcut · **Shelf**: screenshots to Shelf · **Colors** · **About**: version, check for updates, theme file), each option a card with a short explanation and an On / Off switch. |
 
 System notices: volume and brightness HUD, Caps Lock, keyboard language changes,
 charger plugged/unplugged, low battery, Wi-Fi connected or lost, audio output/headphones changed, text copied,
@@ -64,8 +64,26 @@ Publishing a release: bump `version` in `Cargo.toml`, build, and create a GitHub
 
 ## UI colors
 
-Settings tab → **UI colors…** opens `%APPDATA%\Veyra\theme.conf`
-in Notepad. Save it and Veyra applies the change within a second. Lines starting with `#` are comments.
+Settings tab → **Colors…** opens a page inside the island:
+
+* **Island / Icons**: choose what to color. **Island** has Background (closed), When open, Text and Highlights (main
+  buttons and switches), each with its color and code. **Icons** shows All (every regular icon) and one tile per
+  feature: its icon, buttons, notices and, for the Shelf, file type badges.
+* **The color card** (right): pick any color on the **color wheel** (around = the color, toward the middle = paler) and
+  how light it is with the bar beside it, click one of the **Quick colors**, or type a code (`#1E4FD8`). Copy / paste
+  sit beside the code (`Ctrl+C` / `Ctrl+V` work too; pasting takes `#1E4FD8`, `1E4FD8`, `#ABC` or `rgb(30, 79, 216)`).
+  Everything except Background can go back to automatic. `Esc` goes back to Settings. The page stays open while
+  you look at another tab or close the island, so coming back to Settings brings you back to Colors.
+* **Ready-made looks**: eight looks (Black, Graphite, Midnight, Plum, Forest, Night, Blush, Cream) shown as small islands
+  with their colors, one click each. Each brings its own background and one color family for buttons and icons;
+  Black uses the built-in colors.
+* Text on **Automatic** turns light or dark by itself so it stays readable; pick a color under **Text** to choose it
+  yourself. A picked text color changes words only: icons (also on **Automatic**), button backgrounds, the
+  highlight under the mouse, switches, outlines and separators stay neutral, and icons drawn as shapes (the lyrics
+  button, the battery) follow the icon color like every other icon. **Reset** puts back the default colors.
+
+Every change is saved to `%APPDATA%\Veyra\theme.conf`. **Advanced…** opens that file in Notepad, with every option
+below. Save it and Veyra applies the change within a second. Lines starting with `#` are comments.
 
 ```ini
 # solid or gradient
@@ -76,6 +94,8 @@ gradient = #F07A8A 0, #F2B5BC 0.45, #F2DCE0 0.75
 # auto = white on dark backgrounds, dark on light ones
 text = auto
 # faded text (hints, labels, inactive icons): auto, normal, high, max, or 0-100
+# (auto firms it up a little on dark backgrounds, more on light ones and for a text color that stands
+# out less, like red on black; normal = the faintest)
 text_contrast = auto
 
 # while the island is open: same, solid or gradient (it fades between the two)
@@ -97,7 +117,7 @@ button_accent = auto
 # text and icons on them; auto = black or white, whichever reads better
 button_accent_text = auto
 
-# regular icons (auto = the text color); the open tab and switched-on toggles (auto = feature color)
+# regular icons (auto = white on dark backgrounds, dark on light ones); the open tab and switched-on toggles (auto = feature color)
 icon = auto
 icon_active = auto
 
@@ -134,7 +154,7 @@ Or just double-click `rebuild.bat`: it closes the running Veyra, builds, and sta
 For screenshots and testing, `VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|tasksday|taskremind|clipboard|clipboardempty|tasksempty|toast|volume|focuspill|shelfimg|cliphover|cliphoverfull|caps|capsoff|tws|charging|copied|idle|line`
 opens a specific view on start (demo mode never saves data). `VEYRA_DEMO=stress` keeps opening and closing the island
 to check for leaks (`VEYRA_STRESS=fetch|toggle|water`, `VEYRA_STRESS_MS`, `VEYRA_STRESS_N`). `VEYRA_MOUSE=x,y` pretends
-the cursor rests there, to see hovers. `VEYRA_DEBUG=1` writes a log to `%TEMP%\veyra.log`.
+the cursor rests there, to see hovers. `VEYRA_THEME="text = #FF8A3D; icon = auto"` tries theme options for that run only (not saved). `VEYRA_DEBUG=1` writes a log to `%TEMP%\veyra.log`.
 `VEYRA_NO_UPDATE=1` skips the update check. `VEYRA_UPDATE_FROM=1.0.0` pretends to be that version; with
 `VEYRA_DEMO=update` it installs the latest release right away (run a copy in a spare folder: it replaces that exe).
 `veyra.exe --quit` asks a running Veyra to close (with its closing animation, saving data first).

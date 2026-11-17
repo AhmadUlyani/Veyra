@@ -39,6 +39,103 @@ const GREEN: C = C::hex(0x4CD787);
 const MEDIA_C: C = C::hex(0xF2F2F7);
 const CLIP_C: C = C::hex(0x5AC8FA);
 const SETTINGS_C: C = C::hex(0xAEAEB2);
+
+/// Quick colors on the Colors page: deep tones for the backgrounds, bright ones for the rest.
+const QUICK_BG: [u32; 8] = [0x000000, 0x1C1C1E, 0x2B2D31, 0x0F1B3D, 0x132A5E, 0x2A1740, 0x0F2A22, 0xF4EFE6];
+const QUICK_ACCENT: [u32; 8] = [0xFF7A59, 0xFFC53D, 0x4CD787, 0x5EC8FF, 0x6E9BFF, 0xB18CFF, 0xFF6FAE, 0xE8EAED];
+
+/// Text colors that read on dark backgrounds, and on light ones.
+const QUICK_TEXT: [u32; 8] = [0xFFFFFF, 0xE8EAED, 0xC9CED6, 0xF4EFE6, 0xA9C4FF, 0xFFD6A5, 0xB7F0C8, 0xFFB3C7];
+const QUICK_TEXT_LIGHT: [u32; 8] = [0x111111, 0x3B342C, 0x5A2E1A, 0x7A1F3D, 0x1F3A6E, 0x1F4D36, 0x4B2A6B, 0x8A4A0F];
+
+/// Colors page: the "All icons" choice (0-2 are island parts, 3-9 the features).
+const COL_ICONS: u8 = 10;
+/// Colors page: the text (belongs with the island parts).
+const COL_TEXT: u8 = 11;
+
+/// A ready-made look on the Colors page: the background (one color, or a gradient from the
+/// bottom of the island to the top) and one color family that goes with it: `main` for the
+/// highlights, every feature (tab icons, timer, buttons, notices) and the music bars, `soft` (a
+/// gentler shade of it) for every other icon, the break timer and a lyric line under the mouse.
+/// "auto" = the built-in colors. Light looks use darker shades so everything stays readable.
+/// `extra`: settings of the look's own, applied last (a darker button with white text, ...).
+struct Look {
+    name: &'static str,
+    bg: &'static str,
+    main: &'static str,
+    soft: &'static str,
+    extra: &'static [(&'static str, &'static str)],
+}
+
+const PRESETS: [Look; 8] = [
+    Look { name: "Black", bg: "#000000", main: "auto", soft: "auto", extra: &[] },
+    Look { name: "Graphite", bg: "#2B2D31", main: "#C9CED6", soft: "#A9AFB9", extra: &[] },
+    Look { name: "Midnight", bg: "#0F1B3D", main: "#6E9BFF", soft: "#9DB9FF", extra: &[] },
+    Look { name: "Plum", bg: "#2A1740", main: "#C792EA", soft: "#DDB8F2", extra: &[] },
+    Look { name: "Forest", bg: "#0F2A22", main: "#5FD08A", soft: "#93DDB0", extra: &[] },
+    // night blue at the bottom fading to black at the top, open or closed
+    Look {
+        name: "Night",
+        bg: "#132A5E 0, #0A1430 0.4, #030509 1",
+        main: "#8FB0FF",
+        soft: "#A9C4FF",
+        extra: &[
+            ("button_accent", "#1F4AA8"),
+            ("button_accent_text", "#FFFFFF"),
+            ("audio_bar", "#6F9BFF"),
+            ("spectrum", "#6F9BFF"),
+            ("lyrics_hover", "#9DB9FF"),
+            ("text_contrast", "high"),
+        ],
+    },
+    Look { name: "Blush", bg: "#F07A8A 0, #F2B5BC 0.45, #F2DCE0 0.75", main: "#B0245A", soft: "#8A3550", extra: &[] },
+    Look { name: "Cream", bg: "#F4EFE6", main: "#A2531F", soft: "#7E5634", extra: &[] },
+];
+
+/// theme.conf settings of a ready-made look: background (the same when open) and its color
+/// family everywhere; text picked automatically so it stays readable.
+fn preset_keys(l: &Look) -> Vec<(&'static str, String)> {
+    let mut kv = if l.bg.contains(',') {
+        vec![("mode", "gradient".to_string()), ("gradient", l.bg.to_string())]
+    } else {
+        vec![("mode", "solid".to_string()), ("solid", l.bg.to_string())]
+    };
+    // everything else that could clash with the look goes back to automatic
+    for k in [
+        "text",
+        "text_contrast",
+        "expanded_text",
+        "expanded_text_contrast",
+        "icon_active",
+        "button_accent_text",
+        "button",
+        "button_hover",
+        "button_text",
+        "button_active",
+    ] {
+        kv.push((k, "auto".into()));
+    }
+    kv.push(("expanded_mode", "same".into()));
+    for k in ["button_accent", "audio_bar", "spectrum"] {
+        kv.push((k, l.main.into()));
+    }
+    for k in theme::FEATURE_KEYS {
+        kv.push((k, l.main.into()));
+    }
+    for k in ["icon", "timer_break", "lyrics_hover"] {
+        kv.push((k, l.soft.into()));
+    }
+    for (k, v) in l.extra {
+        kv.push((k, v.to_string()));
+    }
+    kv
+}
+
+/// The background stops of a ready-made look.
+fn preset_bg(bg: &str) -> Vec<(f32, C)> {
+    let mode = if bg.contains(',') { "gradient" } else { "solid" };
+    theme::parse(&format!("mode = {mode}\nsolid = {bg}\ngradient = {bg}")).bg
+}
 /// the shortcut that mutes / unmutes every microphone: the user's own (Settings), else the first
 /// one free of these (NVIDIA's overlay, for one, can hold Ctrl+Alt+M)
 const HOTKEY_MIC: i32 = 1;
@@ -93,6 +190,14 @@ mod ic {
     pub const RIGHT: char = '\u{E76C}';
     pub const MIC: char = '\u{E720}';
     pub const GEAR: char = '\u{E713}';
+    pub const COPY: char = '\u{E8C8}';
+    pub const PASTE: char = '\u{E77F}';
+    pub const PALETTE: char = '\u{E790}';
+    pub const INFO: char = '\u{E946}';
+    pub const POWER: char = '\u{E7E8}';
+    pub const KEYBOARD: char = '\u{E765}';
+    pub const CAMERA: char = '\u{E722}';
+    pub const EDIT: char = '\u{E70F}';
 }
 
 // ------------------------------------------------------------------ types
@@ -119,7 +224,10 @@ enum Opt {
     Autostart,
     /// true: close only on a click outside
     Close(bool),
+    /// the Colors page (pick colors without editing a file)
     Theme,
+    /// open theme.conf in a text editor (every option)
+    ThemeFile,
     Update,
     /// pick a new mute shortcut (the next keys pressed)
     Shortcut,
@@ -144,6 +252,8 @@ enum Field {
     Interval,
     DrinkMl,
     TaskTime,
+    /// a #RRGGBB color on the Colors page
+    Hex,
 }
 
 /// An in-progress edit: field, typed text, and whether the next key replaces the text.
@@ -308,6 +418,22 @@ enum Act {
     Toast,
     VolBar(R),
     Opt(Opt),
+    /// Colors page: back to Settings, what to color, a ready-made look, the wheel and the
+    /// brightness bar (both follow the mouse while held), automatic color, reset everything
+    ColBack,
+    ColTarget(u8),
+    ColPreset(usize),
+    ColWheel(R),
+    ColBright(R),
+    ColAuto,
+    ColReset,
+    /// copy the color code / use a color code from the clipboard
+    ColCopy,
+    ColPaste,
+    /// one of the quick colors under the code
+    ColSwatch(u32),
+    /// a category in the Settings sidebar (General, Music, Microphone, Shelf, -, About)
+    SetCat(u8),
 }
 
 pub enum Deferred {
@@ -427,6 +553,9 @@ struct Slide {
     /// +1 slides left (moving to a later tab), -1 slides right
     dir: f32,
     t: f32,
+    /// a page inside the same tab (Settings <-> Colors): a short glide with a cross-fade
+    /// instead of the full carousel
+    sub: bool,
 }
 
 const SLIDE_SECS: f32 = 0.34;
@@ -610,6 +739,18 @@ pub struct App {
     hover_out: Option<Instant>,
     /// last seen modification time of theme.json (reloaded when it changes)
     theme_mtime: Option<std::time::SystemTime>,
+    /// Settings ▸ Colors: showing, what is being colored (0 background, 1 open island,
+    /// 2 highlights), the picked hue / saturation / brightness, the theme.conf text being edited
+    colors_open: bool,
+    /// the Settings category showing
+    settings_cat: u8,
+    col_target: u8,
+    col_hsv: (f32, f32, f32),
+    col_text: String,
+    /// the color wheel image, made once per pixel size
+    col_wheel: std::cell::RefCell<Option<(u32, ID2D1Bitmap)>>,
+    /// what came of the last copy / paste on the Colors page, shown in the code box for a moment
+    col_note: Option<(&'static str, bool, Instant)>,
     /// how far the open (expanded) colors are faded in, 0..1
     open_k: f32,
     /// a long line under the mouse is sliding (keeps frames coming), and which one since when
@@ -800,6 +941,13 @@ impl App {
             hover_in: None,
             hover_out: None,
             theme_mtime: theme::modified(),
+            colors_open: false,
+            settings_cat: 0,
+            col_target: 0,
+            col_hsv: (0.0, 0.0, 0.0),
+            col_text: String::new(),
+            col_wheel: std::cell::RefCell::new(None),
+            col_note: None,
             open_k: 0.0,
             marquee_on: std::cell::Cell::new(false),
             marquee_at: std::cell::Cell::new(None),
@@ -896,9 +1044,19 @@ impl App {
         }
     }
 
+    /// VEYRA_THEME="text = #FF8A3D; icon = auto": theme options for this run only (not saved).
+    fn demo_theme(&mut self) {
+        if let Ok(s) = std::env::var("VEYRA_THEME") {
+            let kv: Vec<(String, String)> = s.split(';').filter_map(|p| p.split_once('=')).map(|(k, v)| (k.trim().to_string(), v.trim().to_string())).collect();
+            let kv: Vec<(&str, String)> = kv.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+            self.col_set(&kv, false);
+        }
+    }
+
     /// Screenshot/testing aid: VEYRA_DEMO=media|lyrics|focus|water|shelf|tasks|toast|volume|caps|capsoff|stress
     fn demo_view(&mut self, v: &str) {
         self.demo = true;
+        self.demo_theme();
         match v {
             "lyrics" => {
                 self.lyrics_open = true;
@@ -937,12 +1095,61 @@ impl App {
             }
             // the mouse comes onto the pill (and leaves again) while it shows lyrics
             "settings" => self.expand(Some(Tab::Settings)),
+            // Settings, then the Colors page glides in (for VEYRA_DUMP_SEQ)
+            "settingstocolors" => {
+                self.expand(Some(Tab::Settings));
+                self.demo_step = Some((Instant::now() + Duration::from_millis(900), "tocolors"));
+            }
+            "settingsabout" => {
+                self.settings_cat = 5;
+                self.expand(Some(Tab::Settings));
+            }
+            // the Colors page; "colorslight" shows a light look without saving it
+            // a ready-made look on the Music page, not saved: VEYRA_DEMO=look3 (Plum), look5 (Night), ...
+            l if l.starts_with("look") => {
+                let i: usize = l[4..].parse().unwrap_or(0);
+                if let Some(look) = PRESETS.get(i) {
+                    self.col_set(&preset_keys(look), false);
+                }
+                // VEYRA_THEME then goes on top of the look
+                self.demo_theme();
+                self.expand(Some(Tab::Media));
+            }
+            "colors" | "colorsaccent" | "colorslight" | "colorswater" | "colorstext" | "colorsback" => {
+                self.expand(Some(Tab::Settings));
+                self.open_colors();
+                if v == "colorstext" {
+                    self.col_target = COL_TEXT;
+                    self.col_set(&[("text", "#FFD6A5".into()), ("expanded_text", "same".into())], false);
+                    self.col_hsv = theme::to_hsv(self.col_color());
+                }
+                if v == "colorsback" {
+                    // look at another feature, then come back to Settings: still on Colors
+                    self.act(Act::Tab(Tab::Water), 0.0);
+                    self.act(Act::Tab(Tab::Settings), 0.0);
+                }
+                if v == "colorswater" {
+                    self.col_target = 5;
+                    self.col_set(&[("color_water", "#3DDC97".into())], false);
+                    self.col_hsv = theme::to_hsv(self.col_color());
+                }
+                if v == "colorsaccent" {
+                    self.col_target = 2;
+                    self.col_hsv = theme::to_hsv(self.col_color());
+                }
+                if v == "colorslight" {
+                    self.col_set(&preset_keys(&PRESETS[7]), false);
+                    self.col_hsv = theme::to_hsv(self.col_color());
+                }
+            }
             "settingskeys" => {
                 self.expand(Some(Tab::Settings));
+                self.settings_cat = 2;
                 self.hk_capture = true;
             }
             "settingstaken" => {
                 self.expand(Some(Tab::Settings));
+                self.settings_cat = 2;
                 self.hk_capture = true;
                 self.hk_msg = Some(("Ctrl+Alt+M is taken by another app".into(), false, Instant::now() + Duration::from_secs(60)));
             }
@@ -1051,7 +1258,7 @@ impl App {
                 self.data.tasks.clear();
                 self.expand(Some(Tab::Tasks));
             }
-            "toast" => self.toast(TIcon::Drop, "Time to drink some water", "750 / 2000 ml today · tap to log", 600.0, WATER_C, Some(Tab::Water)),
+            "toast" => self.toast(TIcon::Drop, "Time to drink some water", "750 / 2000 ml today · tap to log", 600.0, feat(&self.gfx, Tab::Water), Some(Tab::Water)),
             "volume" => {
                 self.hud(K_VOL, ic::VOL, 0.64, WHITE);
                 if let Some(t) = &mut self.toast {
@@ -1083,7 +1290,7 @@ impl App {
                 self.upd_busy = true;
                 update::check(true);
             }
-            "taskremind" => self.toast(TIcon::G(ic::TASKS), "Task due in 1 hour", "Send the weekly report · 14:30", 600.0, TASK_C, Some(Tab::Tasks)),
+            "taskremind" => self.toast(TIcon::G(ic::TASKS), "Task due in 1 hour", "Send the weekly report · 14:30", 600.0, feat(&self.gfx, Tab::Tasks), Some(Tab::Tasks)),
             "taskpill" | "taskfocus" => {
                 self.demo_idle = true;
                 let n = now().secs;
@@ -1345,9 +1552,12 @@ impl App {
                 Tab::Shelf => (500.0, 196.0),
                 Tab::Tasks => (500.0, 250.0),
                 Tab::Clipboard => (500.0, 250.0),
-                Tab::Settings => (500.0, 250.0),
+                Tab::Settings if self.colors_open => (500.0, 402.0),
+                Tab::Settings => (500.0, 262.0),
             };
-            return (w, h, 30.0, ViewKey::Expanded(self.tab, lyr));
+            // Settings: the flag says whether the Colors page is showing (fades like lyrics)
+            let flag = if self.tab == Tab::Settings { self.colors_open } else { lyr };
+            return (w, h, 30.0, ViewKey::Expanded(self.tab, flag));
         }
         if !self.hidden {
             if let Some(t) = &self.toast {
@@ -1574,7 +1784,8 @@ impl App {
             Opt::Shots => self.tray_cmd(tray::CMD_SHOTS),
             Opt::Autostart => self.tray_cmd(tray::CMD_AUTOSTART),
             Opt::Close(click) => self.tray_cmd(if click { tray::CMD_CLOSE_CLICK } else { tray::CMD_CLOSE_AUTO }),
-            Opt::Theme => self.tray_cmd(tray::CMD_THEME),
+            Opt::Theme => self.open_colors(),
+            Opt::ThemeFile => self.tray_cmd(tray::CMD_THEME),
             Opt::Update => self.tray_cmd(tray::CMD_UPDATE),
             Opt::Shortcut => {
                 if self.hk_capture {
@@ -1587,94 +1798,628 @@ impl App {
         self.kick();
     }
 
-    /// Every switch that used to be in the right-click menu, in two columns.
+    /// Settings, laid out like Windows Settings: categories down the left, the chosen one's
+    /// options on the right as cards (icon, name, a short explanation, the switch or button).
     fn draw_settings(&self, g: &Gfx, ui: &mut Ui, c: R) {
         let s = &self.data.settings;
-        let gap = 16.0;
-        let cw = (c.w - gap) / 2.0;
-        let rh = 30.0;
-        let (lx, rx) = (c.x, c.x + cw + gap);
-        let row = |i: usize| c.y - 4.0 + i as f32 * (rh + 2.0);
-        let mic = self.mic_muted;
-        let left: [(&str, Option<bool>, Opt, C); 3] = [
-            ("Lyrics in the closed island", Some(s.mini_lyrics), Opt::MiniLyrics, GREEN),
-            ("Shrink to a line until hovered", Some(s.line_mode), Opt::LineMode, GREEN),
-            ("Mute all microphones", mic, Opt::MicMute, RED),
+        // sidebar
+        let sw = 128.0;
+        let cats: [(char, &str); 6] = [
+            (ic::GEAR, "General"),
+            (ic::MUSIC, "Music"),
+            (ic::MIC, "Microphone"),
+            (ic::FOLDER, "Shelf"),
+            (ic::PALETTE, "Colors"),
+            (ic::INFO, "About"),
         ];
-        for (i, (label, on, opt, col)) in left.iter().enumerate() {
-            setting_row(g, ui, R::new(lx, row(i), cw, rh), label, *on, *opt, *col);
+        let ih = 29.0;
+        for (i, (glyph, name)) in cats.iter().enumerate() {
+            let b = R::new(c.x - 4.0, c.y - 6.0 + i as f32 * (ih + 3.0), sw, ih);
+            let on = self.settings_cat as usize == i;
+            let act = if i == 4 { Act::Opt(Opt::Theme) } else { Act::SetCat(i as u8) };
+            let hv = ui.hit(b, act);
+            if on {
+                g.rrect(b, 8.0, surf_active(g));
+                // the little bar Windows puts beside the chosen category
+                g.rrect(R::new(b.x + 1.0, b.cy() - 7.0, 3.0, 14.0), 1.5, g.theme.feature[6].unwrap_or(WATER_C));
+            } else if hv {
+                g.rrect(b, 8.0, surf(g, false));
+            }
+            let col = if on || hv { WHITE } else { T2 };
+            g.icon(*glyph, R::new(b.x + 10.0, b.y, 18.0, b.h), 13.0, btn_icon(g, col));
+            g.text(name, R::new(b.x + 36.0, b.y, b.w - 40.0, b.h), 12.0, if on { 600 } else { 500 }, btn_fg(g, col), Al::L);
         }
-        let right: [(&str, Option<bool>, Opt, C); 2] = [
-            ("Add screenshots to Shelf", Some(s.screenshots), Opt::Shots, GREEN),
-            ("Start with Windows", Some(self.autostart), Opt::Autostart, GREEN),
-        ];
-        for (i, (label, on, opt, col)) in right.iter().enumerate() {
-            setting_row(g, ui, R::new(rx, row(i), cw, rh), label, *on, *opt, *col);
-        }
-        // how the open island closes: two choices side by side
-        {
-            let r = R::new(rx, row(2), cw, rh);
-            g.text("Close", R::new(r.x + 8.0, r.y, 40.0, r.h), 12.5, 500, WHITE.a(0.9), Al::L);
-            let sw = (r.w - 52.0) / 2.0;
-            for (k, (label, click)) in [("Mouse leaves", false), ("Click outside", true)].into_iter().enumerate() {
-                let b = R::new(r.x + 48.0 + k as f32 * (sw + 4.0), r.y + 3.0, sw - 4.0, r.h - 6.0);
-                let on = s.close_on_click == click;
-                let hv = ui.hit(b, Act::Opt(Opt::Close(click)));
-                g.rrect(b, b.h / 2.0, if on { surf_active(g) } else { surf(g, hv) });
-                g.text(label, b, 11.5, if on { 600 } else { 500 }, if on { WHITE } else { T2 }, Al::C);
+
+        // the chosen category: its name, then its cards
+        let x = c.x + sw + 10.0;
+        let w = c.right() - x;
+        let cat = (self.settings_cat as usize).min(5);
+        g.text(cats[cat].1, R::new(x + 2.0, c.y - 8.0, w, 24.0), 16.0, 700, WHITE, Al::L);
+        let ch = 46.0;
+        let card = |i: usize| R::new(x, c.y + 24.0 + i as f32 * (ch + 4.0), w, ch);
+        match cat {
+            0 => {
+                setting_card(g, ui, card(0), ic::POWER, "Start with Windows", "Opens when you sign in", Some(self.autostart), Opt::Autostart, GREEN);
+                setting_card(g, ui, card(1), ic::MINUS, "Shrink to a line", "A thin line until the mouse comes", Some(s.line_mode), Opt::LineMode, GREEN);
+                // how the open island closes: two choices on the right
+                let r = card(2);
+                card_base(g, r, false);
+                card_text(g, r, ic::CLOSE, "Closes when", "The open island closes", 150.0);
+                let bw = 74.0;
+                for (k, (label, click)) in [("Mouse leaves", false), ("Click outside", true)].into_iter().enumerate() {
+                    let b = R::new(r.right() - 10.0 - (2 - k) as f32 * (bw + 4.0) + 4.0, r.cy() - 13.0, bw, 26.0);
+                    let on = s.close_on_click == click;
+                    let hv = ui.hit(b, Act::Opt(Opt::Close(click)));
+                    g.rrect(b, 13.0, if on { surf_active(g) } else { surf(g, hv) });
+                    g.text(label, b, 11.0, if on { 600 } else { 500 }, if on { WHITE } else { T2 }, Al::C);
+                }
+            }
+            1 => {
+                setting_card(g, ui, card(0), ic::LYRICS, "Lyrics in the closed island", "The current line shows in the pill", Some(s.mini_lyrics), Opt::MiniLyrics, GREEN);
+            }
+            2 => {
+                setting_card(g, ui, card(0), ic::MIC, "Mute all microphones", "Every microphone at once", self.mic_muted, Opt::MicMute, RED);
+                // the shortcut: click the button, then press the new keys
+                let r = card(1);
+                card_base(g, r, false);
+                let cap = self.hk_capture;
+                let val = if cap { "Press keys\u{2026}".to_string() } else { self.hotkey.clone().unwrap_or_else(|| "None free".into()) };
+                let bw = g.measure(&val, 12.0, 600) + 24.0;
+                let b = R::new(r.right() - 10.0 - bw, r.cy() - 13.0, bw, 26.0);
+                card_text(g, r, ic::KEYBOARD, "Mute shortcut", "Works from any app", b.x - r.x - 10.0);
+                let hv = ui.hit(b, Act::Opt(Opt::Shortcut));
+                if cap {
+                    pill_btn(g, ui, b, &val, accent_fg(g), accent_btn(g, feat(g, Tab::Settings)), Act::Opt(Opt::Shortcut));
+                } else {
+                    pill_btn(g, ui, b, &val, btn_fg(g, WHITE), surf(g, hv), Act::Opt(Opt::Shortcut));
+                }
+                // under the cards: how to pick, or what came of the last pick
+                let hr = R::new(x + 4.0, card(2).y, w - 8.0, 18.0);
+                let msg = self.hk_msg.as_ref().filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3));
+                if let Some((t, good, _)) = msg {
+                    g.text(t, hr, 11.5, 600, if *good { GREEN } else { RED }, Al::L);
+                } else if cap {
+                    g.text("Two of Ctrl, Alt, Shift, Win + a key \u{00B7} Esc cancels \u{00B7} \u{232B} default", hr, 11.0, 500, T2, Al::L);
+                }
+            }
+            3 => {
+                setting_card(g, ui, card(0), ic::CAMERA, "Add screenshots to Shelf", "New screenshots land on the Shelf", Some(s.screenshots), Opt::Shots, GREEN);
+            }
+            _ => {
+                // version and updates
+                let r = card(0);
+                card_base(g, r, false);
+                let upd = match (&self.upd_avail, self.upd_busy) {
+                    (_, true) => "Updating\u{2026}".to_string(),
+                    (Some(r), false) => format!("Update to v{}", r.version),
+                    (None, false) => "Check for updates".to_string(),
+                };
+                let uw = g.measure(&upd, 12.0, 600) + 26.0;
+                let ub = R::new(r.right() - 10.0 - uw, r.cy() - 13.0, uw, 26.0);
+                card_text(g, r, ic::INFO, &format!("Veyra {}", update::CURRENT), "Updates itself", ub.x - r.x - 10.0);
+                let hv = ui.hover(ub);
+                if self.upd_avail.is_some() {
+                    pill_btn(g, ui, ub, &upd, accent_fg(g), accent_btn(g, GREEN), Act::Opt(Opt::Update));
+                } else {
+                    pill_btn(g, ui, ub, &upd, btn_fg(g, WHITE), surf(g, hv), Act::Opt(Opt::Update));
+                }
+                // every color option, as a text file
+                let r = card(1);
+                let hv = ui.hit(r, Act::Opt(Opt::ThemeFile));
+                card_base(g, r, hv);
+                card_text(g, r, ic::EDIT, "Theme file", "Every color option, in Notepad", r.w - 40.0);
+                g.icon(ic::RIGHT, R::new(r.right() - 30.0, r.y, 20.0, r.h), 10.0, btn_icon(g, T2));
             }
         }
-        // the mute shortcut
-        {
-            // the button shows the shortcut; click it, then press the new keys
-            // across both columns: room for the hint and the message beside the button
-            let r = R::new(lx, row(3), c.w, rh);
-            let cap = self.hk_capture;
-            let val = if cap {
-                "Press keys…".to_string()
-            } else {
-                self.hotkey.clone().unwrap_or_else(|| "None free".into())
-            };
-            let bw = g.measure(&val, 12.0, 600) + 22.0;
-            let b = R::new(r.right() - bw - 2.0, r.y + 3.0, bw, r.h - 6.0);
-            let hv = ui.hit(b, Act::Opt(Opt::Shortcut));
-            if cap {
-                pill_btn(g, ui, b, &val, accent_fg(g), accent_btn(g, SETTINGS_C), Act::Opt(Opt::Shortcut));
-            } else {
-                pill_btn(g, ui, b, &val, btn_fg(g, WHITE), surf(g, hv), Act::Opt(Opt::Shortcut));
-            }
-            // left of it: the label, a hint while picking, or what came of the last pick
-            let lr = R::new(r.x + 8.0, r.y, b.x - r.x - 14.0, r.h);
-            let msg = self.hk_msg.as_ref().filter(|(_, _, at)| at.elapsed() < Duration::from_secs(3));
-            if let Some((t, good, _)) = msg {
-                g.text(t, lr, 11.5, 600, if *good { GREEN } else { RED }, Al::L);
-            } else if cap {
-                g.text("Two of Ctrl, Alt, Shift, Win + a key · Esc cancels · ⌫ default", lr, 11.5, 500, T2, Al::L);
-            } else {
-                g.text("Mute shortcut", lr, 12.5, 500, WHITE.a(0.9), Al::L);
-            }
+    }
+
+    // -------------------------------------------------------------- colors page
+
+    fn open_colors(&mut self) {
+        self.commit_edit();
+        theme::ensure_file();
+        self.col_text = theme::read_text();
+        self.colors_open = true;
+        self.col_hsv = theme::to_hsv(self.col_color());
+    }
+
+    /// The color now used by what is being colored (its automatic color when it has none).
+    fn col_color(&self) -> C {
+        let t = &self.gfx.theme;
+        match self.col_target {
+            COL_ICONS => t.icon.unwrap_or(self.gfx.neutral()),
+            COL_TEXT => t.fg,
+            0 => t.bg.first().map(|s| s.1).unwrap_or(BLACK),
+            1 => t.bg_open.first().map(|s| s.1).unwrap_or(BLACK),
+            2 => t.button_accent.unwrap_or(GREEN),
+            n => feat(&self.gfx, TABS[(n as usize - 3).min(6)]),
         }
-        // bottom: version, theme file, updates
-        let by = row(4) + 8.0;
-        g.text(&format!("Veyra {}", update::CURRENT), R::new(lx + 8.0, by, 120.0, 28.0), 12.0, 500, T3, Al::L);
-        let upd = match (&self.upd_avail, self.upd_busy) {
-            (_, true) => "Updating…".to_string(),
-            (Some(r), false) => format!("Update to v{}", r.version),
-            (None, false) => "Check for updates".to_string(),
+    }
+
+    /// The feature being colored (targets 3 and up), as its index in `TABS`.
+    fn col_feature(&self) -> Option<usize> {
+        (3..=9).contains(&self.col_target).then(|| self.col_target as usize - 3)
+    }
+
+    /// Whether what is being colored follows something else (open island: the background;
+    /// highlights: each feature's own color).
+    fn col_auto(&self) -> bool {
+        match self.col_target {
+            1 => !matches!(theme::value(&self.col_text, "expanded_mode").as_deref(), Some("solid") | Some("gradient")),
+            2 => self.gfx.theme.button_accent.is_none(),
+            COL_ICONS => self.gfx.theme.icon.is_none(),
+            COL_TEXT => matches!(theme::value(&self.col_text, "text").as_deref(), None | Some("auto")),
+            0 => false,
+            n => self.gfx.theme.feature[(n as usize - 3).min(6)].is_none(),
+        }
+    }
+
+    fn col_apply(&mut self, c: C, save: bool) {
+        let hx = theme::hex(c);
+        let kv: Vec<(&str, String)> = match self.col_target {
+            0 => vec![("mode", "solid".into()), ("solid", hx)],
+            1 => vec![("expanded_mode", "solid".into()), ("expanded_solid", hx)],
+            2 => vec![("button_accent", hx)],
+            COL_ICONS => vec![("icon", hx)],
+            COL_TEXT => vec![("text", hx), ("expanded_text", "same".into())],
+            n => vec![(theme::FEATURE_KEYS[(n as usize - 3).min(6)], hx)],
         };
-        let uw = g.measure(&upd, 12.0, 600) + 28.0;
-        let ub = R::new(c.right() - uw, by, uw, 28.0);
-        let hv = ui.hover(ub);
-        if self.upd_avail.is_some() {
-            pill_btn(g, ui, ub, &upd, accent_fg(g), accent_btn(g, GREEN), Act::Opt(Opt::Update));
-        } else {
-            pill_btn(g, ui, ub, &upd, btn_fg(g, WHITE), surf(g, hv), Act::Opt(Opt::Update));
+        self.col_set(&kv, save);
+    }
+
+    /// Changes options in the edited text and shows the result at once; `save` also writes
+    /// theme.conf (done when the mouse is let go, not on every move).
+    fn col_set(&mut self, kv: &[(&str, String)], save: bool) {
+        if self.col_text.is_empty() {
+            self.col_text = theme::read_text();
         }
-        let tl = "UI colors…";
-        let tw = g.measure(tl, 12.0, 600) + 28.0;
-        let tb = R::new(ub.x - 8.0 - tw, by, tw, 28.0);
-        let hv = ui.hover(tb);
-        pill_btn(g, ui, tb, tl, btn_fg(g, WHITE), surf(g, hv), Act::Opt(Opt::Theme));
+        self.col_text = theme::set_keys(&self.col_text, kv);
+        let th = theme::parse(&self.col_text);
+        if th != self.gfx.theme {
+            self.gfx.set_theme(&th);
+        }
+        if save && theme::save_text(&self.col_text) {
+            // our own write: nothing to reload
+            self.theme_mtime = theme::modified();
+        }
+        self.kick();
+    }
+
+    fn col_copy(&mut self) {
+        self.edit = None;
+        let t = theme::hex(self.col_color());
+        let ok = clip::write(self.hwnd, &t);
+        self.col_note = Some(if ok { ("Copied", true, Instant::now()) } else { ("Couldn't copy", false, Instant::now()) });
+        self.kick();
+    }
+
+    /// Uses a color code from the clipboard (#1E4FD8, 1E4FD8, #ABC or rgb(30, 79, 216)).
+    fn col_paste(&mut self) {
+        self.edit = None;
+        match clipboard_text().and_then(|s| parse_color_text(&s)) {
+            Some(c) => {
+                self.col_hsv = theme::to_hsv(c);
+                self.col_apply(c, true);
+                self.col_note = Some(("Pasted", true, Instant::now()));
+            }
+            None => self.col_note = Some(("No color code copied", false, Instant::now())),
+        }
+        self.kick();
+    }
+
+    fn col_preset(&mut self, i: usize) {
+        let Some(look) = PRESETS.get(i) else { return };
+        self.col_set(&preset_keys(look), true);
+        self.col_hsv = theme::to_hsv(self.col_color());
+    }
+
+    /// The wheel picks hue (angle) and strength (distance from the middle); the bar picks
+    /// brightness, top = brightest.
+    fn col_drag(&mut self, a: Act, p: (f32, f32), save: bool) {
+        let (mut h, mut s, mut v) = self.col_hsv;
+        match a {
+            Act::ColWheel(r) => {
+                let rad = r.w / 2.0;
+                let (dx, dy) = (p.0 - r.cx(), p.1 - r.cy());
+                h = (dy.atan2(dx) / std::f32::consts::TAU).rem_euclid(1.0);
+                s = ((dx * dx + dy * dy).sqrt() / rad).min(1.0);
+                // starting from a very dark color (black, or the near-black automatic text of a
+                // light look) the wheel would seem to do nothing: start from a visible brightness
+                if v < 0.25 {
+                    v = if self.col_target == COL_TEXT && self.gfx.theme.bg_luma_light() { 0.45 } else { 0.7 };
+                }
+            }
+            Act::ColBright(r) => v = (1.0 - (p.1 - r.y) / r.h).clamp(0.0, 1.0),
+            _ => return,
+        }
+        self.col_hsv = (h, s, v);
+        self.col_apply(theme::hsv(h, s, v), save);
+    }
+
+    /// The wheel image (every hue around, white in the middle) at `px` pixels across.
+    fn wheel_bitmap(&self, g: &Gfx, px: u32) -> Option<ID2D1Bitmap> {
+        if let Some((n, b)) = &*self.col_wheel.borrow() {
+            if *n == px {
+                return Some(b.clone());
+            }
+        }
+        let n = px as usize;
+        let rad = n as f32 / 2.0;
+        let mut buf = vec![0u8; n * n * 4];
+        for y in 0..n {
+            for x in 0..n {
+                let (dx, dy) = (x as f32 + 0.5 - rad, y as f32 + 0.5 - rad);
+                let d = (dx * dx + dy * dy).sqrt();
+                // soft one-pixel edge
+                let a = (rad - d + 0.5).clamp(0.0, 1.0);
+                if a <= 0.0 {
+                    continue;
+                }
+                let c = theme::hsv(dy.atan2(dx) / std::f32::consts::TAU, (d / rad).min(1.0), 1.0);
+                let i = (y * n + x) * 4;
+                let b = |v: f32| (v * a * 255.0).round() as u8;
+                buf[i] = b(c.2);
+                buf[i + 1] = b(c.1);
+                buf[i + 2] = b(c.0);
+                buf[i + 3] = (a * 255.0).round() as u8;
+            }
+        }
+        let bmp = g.create_bitmap(px, px, &buf)?;
+        *self.col_wheel.borrow_mut() = Some((px, bmp.clone()));
+        Some(bmp)
+    }
+
+    /// Name of what can be colored on the Colors page.
+    fn col_name(t: u8) -> &'static str {
+        match t {
+            0 => "Background",
+            1 => "When open",
+            2 => "Highlights",
+            COL_ICONS => "All icons",
+            COL_TEXT => "Text",
+            3 => "Music",
+            4 => "Focus",
+            5 => "Water",
+            6 => "Shelf",
+            7 => "Tasks",
+            8 => "Clipboard",
+            _ => "Settings",
+        }
+    }
+
+    /// Settings > Colors. Left: what to color (the island, or the icons) and the ready-made
+    /// looks. Right: a card that picks the chosen part's color.
+    fn draw_colors(&self, g: &Gfx, ui: &mut Ui, c: R) {
+        let th = &g.theme;
+
+        // header: back on the left, the two less common actions on the right
+        let top = R::new(c.x, c.y - 6.0, c.w, 26.0);
+        let back = R::new(top.x, top.y, 80.0, top.h);
+        let hv = ui.hit(back, Act::ColBack);
+        g.rrect(back, back.h / 2.0, surf(g, hv));
+        g.text("\u{2039}  Settings", back, 12.0, 600, btn_fg(g, WHITE), Al::C);
+        let d = 112.0;
+        let wheel_px = (d * g.scale).round().max(8.0) as u32;
+        let wheel = self.wheel_bitmap(g, wheel_px);
+        if let Some(b) = &wheel {
+            g.bitmap(b, R::new(back.right() + 12.0, top.cy() - 8.0, 16.0, 16.0), 8.0);
+        }
+        g.text("Colors", R::new(back.right() + 34.0, top.y, 120.0, top.h), 14.0, 700, WHITE, Al::L);
+        let fl = "Advanced\u{2026}";
+        let fw = g.measure(fl, 11.5, 600) + 22.0;
+        let fb = R::new(top.right() - fw, top.y + 1.0, fw, top.h - 2.0);
+        let hv = ui.hover(fb);
+        pill_btn(g, ui, fb, fl, btn_fg(g, T2), surf(g, hv), Act::Opt(Opt::ThemeFile));
+        let rl = "Reset";
+        let rw = g.measure(rl, 11.5, 600) + 22.0;
+        let rb = R::new(fb.x - 6.0 - rw, fb.y, rw, fb.h);
+        let hv = ui.hover(rb);
+        pill_btn(g, ui, rb, rl, btn_fg(g, T2), surf(g, hv), Act::ColReset);
+
+        let lw = 282.0;
+        let sy = c.y + 30.0;
+
+        // ---------------------------------------------------------------- what to color
+        // Two groups behind a simple switch: the island itself (three named rows), or the icons
+        // (eight named tiles). Every choice shows its name and its color now.
+        let acc = th.button_accent.unwrap_or(GREEN);
+        let icons_group = (3..=COL_ICONS).contains(&self.col_target);
+        let seg = R::new(c.x, sy, lw, 28.0);
+        g.rrect(seg, 14.0, surf(g, false));
+        let half = (seg.w - 6.0) / 2.0;
+        for (k, (name, target)) in [("Island", 0u8), ("Icons", COL_ICONS)].into_iter().enumerate() {
+            let b = R::new(seg.x + 3.0 + k as f32 * half, seg.y + 3.0, half, seg.h - 6.0);
+            let on = icons_group == (k == 1);
+            let hv = ui.hit(b, Act::ColTarget(if on { self.col_target } else { target }));
+            if on {
+                g.rrect(b, 11.0, surf_active(g));
+            } else if hv {
+                g.rrect(b, 11.0, surf(g, true));
+            }
+            let w = g.measure(name, 12.0, if on { 700 } else { 500 });
+            let gx = b.cx() - (w + 20.0) / 2.0;
+            if k == 0 {
+                fill_stops(g, R::new(gx, b.cy() - 4.5, 14.0, 9.0), 4.5, &th.bg);
+                g.rrect_stroke(R::new(gx + 0.5, b.cy() - 4.0, 13.0, 8.0), 4.0, if on { WHITE.a(0.7) } else { WHITE.a(0.4) }, 1.0, false);
+            } else {
+                for (j, t) in TABS.iter().take(4).enumerate() {
+                    let c = tab_color(g, *t);
+                    g.circle(gx + 3.0 + (j % 2) as f32 * 7.0, b.cy() - 3.5 + (j / 2) as f32 * 7.0, 2.6, nudge(if on { c } else { c.a(0.7) }));
+                }
+            }
+            g.text(name, R::new(gx + 20.0, b.y, w + 4.0, b.h), 12.0, if on { 700 } else { 500 }, if on { WHITE } else { T2 }, Al::L);
+        }
+        let gy = seg.bottom() + 8.0;
+        if !icons_group {
+            // the island: background, open background, text, highlights (2 x 2, as tall as the icon tiles)
+            let open_auto = !matches!(theme::value(&self.col_text, "expanded_mode").as_deref(), Some("solid") | Some("gradient"));
+            let text_auto = matches!(theme::value(&self.col_text, "text").as_deref(), None | Some("auto"));
+            let tiles: [(u8, C, bool); 4] = [
+                (0, th.bg.first().map(|s| s.1).unwrap_or(BLACK), false),
+                (1, th.bg_open.first().map(|s| s.1).unwrap_or(BLACK), open_auto),
+                (COL_TEXT, th.fg, text_auto),
+                (2, acc, th.button_accent.is_none()),
+            ];
+            let tw = (lw - 3.0) / 2.0;
+            let th_ = 61.0;
+            for (i, (t, col, auto)) in tiles.iter().enumerate() {
+                let r = R::new(c.x + (i % 2) as f32 * (tw + 3.0), gy + (i / 2) as f32 * (th_ + 3.0), tw, th_);
+                let on = self.col_target == *t;
+                let hv = ui.hit(r, Act::ColTarget(*t));
+                g.rrect(r, 11.0, if on { surf_active(g) } else { surf(g, hv) });
+                let glow = vivid(*col);
+                g.rrect(r, 11.0, glow.a(if on { 0.16 } else if hv { 0.1 } else { 0.06 }));
+                if on {
+                    g.rrect_stroke(r.inset(0.75, 0.75), 10.25, ring_color(*col), 1.5, false);
+                }
+                // a tiny picture of the part: the closed pill, the open island, words, a switch
+                let sw = R::new(r.x + 11.0, r.cy() - 14.0, 38.0, 28.0);
+                let edge = WHITE.a(0.3);
+                match *t {
+                    0 => {
+                        let pill = R::new(sw.x, sw.cy() - 8.0, sw.w, 16.0);
+                        fill_stops(g, pill, 8.0, &th.bg);
+                        g.rrect_stroke(pill.inset(0.5, 0.5), 7.5, edge, 1.0, false);
+                        g.circle(pill.x + 8.0, pill.cy(), 2.2, nudge(th.fg.a(0.8)));
+                        g.rrect(R::new(pill.x + 13.0, pill.cy() - 1.2, 16.0, 2.4), 1.2, nudge(th.fg.a(0.55)));
+                    }
+                    1 => {
+                        fill_stops(g, sw, 8.0, &th.bg_open);
+                        g.rrect_stroke(sw.inset(0.5, 0.5), 7.5, edge, 1.0, false);
+                        for j in 0..3 {
+                            g.circle(sw.x + 9.0 + j as f32 * 7.0, sw.y + 8.0, 1.8, nudge(th.fg.a(0.7)));
+                        }
+                        g.rrect(R::new(sw.x + 6.0, sw.y + 15.0, sw.w - 12.0, 2.4), 1.2, nudge(th.fg.a(0.45)));
+                        g.rrect(R::new(sw.x + 6.0, sw.y + 20.0, sw.w - 20.0, 2.4), 1.2, nudge(th.fg.a(0.3)));
+                    }
+                    COL_TEXT => {
+                        // the text color on the island's background
+                        fill_stops(g, sw, 8.0, &th.bg);
+                        g.rrect_stroke(sw.inset(0.5, 0.5), 7.5, edge, 1.0, false);
+                        g.text("Aa", sw, 13.0, 700, nudge(*col), Al::C);
+                    }
+                    _ => {
+                        let track = R::new(sw.x + 2.0, sw.cy() - 9.0, sw.w - 4.0, 18.0);
+                        g.rrect(track, 9.0, nudge(*col));
+                        g.circle(track.right() - 9.0, track.cy(), 6.0, accent_fg(g));
+                    }
+                }
+                let tx = sw.right() + 9.0;
+                g.text(Self::col_name(*t), R::new(tx, r.cy() - 17.0, r.right() - tx - 6.0, 17.0), 12.5, 600, WHITE, Al::L);
+                let code = if *auto { "Auto".to_string() } else { theme::hex(*col) };
+                g.text(&code, R::new(tx, r.cy() + 1.0, r.right() - tx - 6.0, 15.0), 10.5, 600, T3, Al::L);
+            }
+        } else {
+            // the icons: every regular icon, then each feature
+            let cols = 4usize;
+            let tw = (lw - 3.0 * (cols as f32 - 1.0)) / cols as f32;
+            let th_ = 61.0;
+            for k in 0..8usize {
+                let t = if k == 0 { COL_ICONS } else { 3 + (k - 1) as u8 };
+                let r = R::new(c.x + (k % cols) as f32 * (tw + 3.0), gy + (k / cols) as f32 * (th_ + 3.0), tw, th_);
+                let on = self.col_target == t;
+                let hv = ui.hit(r, Act::ColTarget(t));
+                g.rrect(r, 11.0, if on { surf_active(g) } else { surf(g, hv) });
+                let own = if k == 0 { th.icon.unwrap_or(g.neutral()) } else { tab_color(g, TABS[k - 1]) };
+                if on {
+                    g.rrect(r, 11.0, vivid(own).a(0.12));
+                    g.rrect_stroke(r.inset(0.75, 0.75), 10.25, ring_color(own), 1.5, false);
+                }
+                let ir = R::new(r.x, r.y + 9.0, r.w, 24.0);
+                g.circle(ir.cx(), ir.cy(), 14.0, vivid(own).a(if on { 0.26 } else if hv { 0.2 } else { 0.13 }));
+                if k == 0 {
+                    g.icon(ic::PLAY, ir, 15.0, nudge(th.icon.unwrap_or(g.neutral())));
+                } else {
+                    let tab = TABS[k - 1];
+                    draw_tab_icon_sized(g, tab, ir, tab_color(g, tab), 15.0);
+                }
+                let name = if k == 0 { "All" } else { Self::col_name(t) };
+                g.text(name, R::new(r.x, r.y + 36.0, r.w, 16.0), 11.0, if on { 700 } else { 500 }, if on { WHITE } else { T2 }, Al::C);
+            }
+        }
+
+        // ---------------------------------------------------------------- ready-made looks
+        let open_differs = th.bg != th.bg_open;
+        let ly = sy + 176.0;
+        let cw = lw / 4.0;
+        let mut named: Option<&str> = None;
+        for (i, look) in PRESETS.iter().enumerate() {
+            let cell = R::new(c.x + (i % 4) as f32 * cw, ly + 20.0 + (i / 4) as f32 * 52.0, cw, 50.0);
+            let hv = ui.hit(cell, Act::ColPreset(i));
+            let stops = preset_bg(look.bg);
+            let picked = th.bg == stops && !open_differs;
+            if hv || (picked && named.is_none()) {
+                named = Some(look.name);
+            }
+            let thumb = R::new(cell.x + 5.0, cell.y, cell.w - 10.0, 30.0);
+            fill_stops(g, thumb, 9.0, &stops);
+            // the look's colors: buttons, icons, softer icons
+            let button = look.extra.iter().find(|(k, _)| *k == "button_accent").map(|(_, v)| *v).unwrap_or(look.main);
+            let dots: Vec<C> = [button, look.main, look.soft].iter().filter_map(|h| theme::color(h)).collect();
+            let dots = if dots.is_empty() { vec![GREEN, C::hex(0x4DB8FF), C::hex(0xFF7A59)] } else { dots };
+            for (k, d) in dots.iter().enumerate() {
+                g.circle(thumb.x + 10.0 + k as f32 * 9.0, thumb.bottom() - 9.0, 3.2, nudge(*d));
+            }
+            if picked {
+                g.rrect_stroke(thumb.inset(-2.5, -2.5), 11.5, WHITE.a(0.95), 1.6, false);
+                g.circle(thumb.right() - 8.0, thumb.y + 8.0, 6.0, nudge(acc));
+                g.icon(ic::CHECK, R::new(thumb.right() - 14.0, thumb.y + 2.0, 12.0, 12.0), 7.0, accent_fg(g));
+            } else if hv {
+                g.rrect_stroke(thumb.inset(-2.5, -2.5), 11.5, WHITE.a(0.5), 1.2, false);
+            } else {
+                g.rrect_stroke(thumb.inset(0.5, 0.5), 8.5, WHITE.a(0.14), 1.0, false);
+            }
+            g.text(look.name, R::new(cell.x, thumb.bottom() + 2.0, cell.w, 15.0), 10.5, if picked { 700 } else { 500 }, if picked || hv { WHITE } else { T2 }, Al::C);
+        }
+        let head = "Ready-made looks";
+        g.text(head, R::new(c.x + 2.0, ly, lw, 16.0), 11.5, 600, T2, Al::L);
+        if let Some(n) = named {
+            let hw = g.measure(head, 11.5, 600);
+            g.text(&format!("\u{00B7}  {n}"), R::new(c.x + hw + 8.0, ly, 120.0, 16.0), 11.5, 500, T3, Al::L);
+        }
+
+        // ---------------------------------------------------------------- the color card
+        let card = R::new(c.x + lw + 14.0, sy, c.right() - (c.x + lw + 14.0), ly + 124.0 - sy);
+        let cur = self.col_color();
+        g.rrect(card, 16.0, WHITE.a(0.05));
+        let lit = vivid(cur);
+        g.rrect_vgrad(R::new(card.x, card.y, card.w, 130.0), 16.0, lit.a(0.22), lit.a(0.0));
+        g.rrect_stroke(card.inset(0.5, 0.5), 15.5, lit.a(0.28), 1.0, false);
+        let ix = card.x + 14.0;
+        let iw = card.w - 28.0;
+        let auto = self.col_auto();
+        let feature = self.col_feature().map(|i| TABS[i]);
+        let ty = card.y + 12.0;
+        match feature {
+            Some(t) => draw_tab_icon(g, t, R::new(ix - 4.0, ty, 22.0, 18.0), tab_color(g, t)),
+            None if self.col_target == COL_ICONS => g.icon(ic::PLAY, R::new(ix - 4.0, ty, 22.0, 18.0), 12.0, nudge(th.icon.unwrap_or(g.neutral()))),
+            None => {
+                g.circle(ix + 6.0, ty + 9.0, 6.0, nudge(cur));
+                g.circle_stroke(ix + 6.0, ty + 9.0, 6.0, WHITE.a(0.35), 1.0);
+            }
+        }
+        g.text(Self::col_name(self.col_target), R::new(ix + 20.0, ty, iw - 20.0, 18.0), 12.5, 700, WHITE, Al::L);
+        let hint = match (self.col_target, feature) {
+            (0, _) if open_differs => "The island while it is closed.",
+            (0, _) if matches!(theme::value(&self.col_text, "text").as_deref(), None | Some("auto")) => "Text stays readable by itself.",
+            (0, _) => "The island while it is closed.",
+            (1, _) if auto => "Same as Background for now.",
+            (1, _) => "The island while it is open.",
+            (2, _) => "Main buttons and switches.",
+            (COL_TEXT, _) if auto => "Light or dark, whichever reads.",
+            (COL_TEXT, _) => "All the words in the island.",
+            (COL_ICONS, _) => "Play, next, tabs not open\u{2026}",
+            (_, Some(Tab::Media)) => "The Music tab icon.",
+            (_, Some(Tab::Focus)) => "Tab icon, timer and notices.",
+            (_, Some(Tab::Water)) => "Icon, buttons and reminders.",
+            (_, Some(Tab::Shelf)) => "Icon, tiles and file types.",
+            (_, Some(Tab::Tasks)) => "Icon, buttons and reminders.",
+            _ => "Tab icon and buttons.",
+        };
+        g.text(hint, R::new(ix, ty + 18.0, iw, 16.0), 10.5, 500, T3, Al::L);
+
+        // wheel (color and strength) with the brightness bar beside it
+        let wy = ty + 42.0;
+        let (gap, bw) = (12.0, 14.0);
+        let wx = ix + (iw - (d + gap + bw)) / 2.0;
+        let wr = R::new(wx, wy, d, d);
+        ui.hit(wr, Act::ColWheel(wr));
+        g.circle(wr.cx(), wr.cy() + 2.0, d / 2.0 + 3.0, C(0.0, 0.0, 0.0, 0.22));
+        if let Some(b) = &wheel {
+            g.bitmap(b, wr, d / 2.0);
+        }
+        g.circle_stroke(wr.cx(), wr.cy(), d / 2.0 + 0.5, WHITE.a(0.18), 1.0);
+        let (h, s, v) = self.col_hsv;
+        let snow = C(0.999, 0.999, 0.999, 1.0);
+        if !auto {
+            let ang = h * std::f32::consts::TAU;
+            let (mx, my) = (wr.cx() + ang.cos() * s * d / 2.0, wr.cy() + ang.sin() * s * d / 2.0);
+            g.circle(mx, my, 8.5, C(0.0, 0.0, 0.0, 0.35));
+            g.circle(mx, my, 6.0, nudge(theme::hsv(h, s, v.max(0.15))));
+            g.circle_stroke(mx, my, 6.5, snow, 2.0);
+        }
+        let br = R::new(wr.right() + gap, wy, bw, d);
+        ui.hit(R::new(br.x - 5.0, br.y - 4.0, br.w + 10.0, br.h + 8.0), Act::ColBright(br));
+        g.push_rr(br, bw / 2.0, 1.0);
+        let n = 40;
+        for k in 0..n {
+            let col = theme::hsv(h, s, 1.0 - k as f32 / (n - 1) as f32);
+            g.rect(R::new(br.x, br.y + br.h * k as f32 / n as f32, br.w, br.h / n as f32 + 0.6), nudge(col));
+        }
+        g.pop();
+        g.rrect_stroke(br, bw / 2.0, WHITE.a(0.3), 1.0, false);
+        if !auto {
+            let ky = br.y + (1.0 - v) * br.h;
+            g.rrect(R::new(br.x - 3.0, ky - 3.5, br.w + 6.0, 7.0), 3.5, C(0.0, 0.0, 0.0, 0.35));
+            g.rrect_stroke(R::new(br.x - 2.0, ky - 2.5, br.w + 4.0, 5.0), 2.5, snow, 1.8, false);
+        }
+
+        // the color's code (click to type one), copy and paste
+        let ry = wy + d + 12.0;
+        let ib = 24.0;
+        let hb = R::new(ix, ry, iw - 2.0 * (ib + 4.0), 26.0);
+        let editing = self.edit.as_ref().filter(|e| e.field == Field::Hex);
+        let hv = ui.hit(hb, Act::Edit(Field::Hex));
+        g.rrect(hb, 9.0, if editing.is_some() { surf_active(g) } else { surf(g, hv) });
+        g.circle(hb.x + 11.0, hb.cy(), 5.5, nudge(cur));
+        g.circle_stroke(hb.x + 11.0, hb.cy(), 5.5, WHITE.a(0.35), 1.0);
+        let tr = R::new(hb.x + 19.0, hb.y, hb.w - 21.0, hb.h);
+        let note = self.col_note.filter(|(_, _, at)| at.elapsed() < Duration::from_millis(1600));
+        match (editing, note) {
+            (Some(e), _) => {
+                let t = format!("#{}|", e.buf.trim_start_matches('#').to_uppercase());
+                g.text(&t, tr, 12.5, 600, WHITE, Al::C);
+            }
+            (None, Some((msg, good, _))) => g.text(msg, tr, 11.0, 600, if good { GREEN } else { RED }, Al::C),
+            (None, None) if auto => g.text("Automatic", tr, 11.5, 600, T2, Al::C),
+            (None, None) => g.text(&theme::hex(cur), tr, 12.0, 600, WHITE, Al::C),
+        }
+        let cb = R::new(hb.right() + 4.0, ry, ib, 26.0);
+        icon_btn(g, ui, cb, ic::COPY, 12.0, T2, Act::ColCopy, true);
+        let pb = R::new(cb.right() + 4.0, ry, ib, 26.0);
+        icon_btn(g, ui, pb, ic::PASTE, 12.0, T2, Act::ColPaste, true);
+
+        // quick colors: one click, no wheel needed (deep tones for backgrounds, bright ones else)
+        let quick: &[u32; 8] = match self.col_target {
+            0 | 1 => &QUICK_BG,
+            COL_TEXT if th.bg_luma_light() => &QUICK_TEXT_LIGHT,
+            COL_TEXT => &QUICK_TEXT,
+            _ => &QUICK_ACCENT,
+        };
+        g.text("Quick colors", R::new(ix, ry + 34.0, iw, 16.0), 10.5, 600, T3, Al::L);
+        let qy = ry + 60.0;
+        let step = iw / 8.0;
+        for (k, hx) in quick.iter().enumerate() {
+            let qc = C::hex(*hx);
+            let (cx, cy) = (ix + step * (k as f32 + 0.5), qy);
+            let qr = R::new(cx - step / 2.0, cy - 10.0, step, 20.0);
+            let hv = ui.hit(qr, Act::ColSwatch(*hx));
+            let picked = !auto && theme::hex(cur) == theme::hex(qc);
+            g.circle(cx, cy, if hv { 7.5 } else { 6.5 }, nudge(qc));
+            if picked {
+                g.circle_stroke(cx, cy, 9.5, WHITE.a(0.95), 1.5);
+            } else {
+                g.circle_stroke(cx, cy, if hv { 7.5 } else { 6.5 }, WHITE.a(0.25), 1.0);
+            }
+        }
+
+        if self.col_target != 0 {
+            let al = match self.col_target {
+                1 => "Same as background",
+                2 => "Automatic colors",
+                COL_ICONS => "Automatic",
+                COL_TEXT => "Automatic",
+                _ => "Original color",
+            };
+            let ab = R::new(ix, card.bottom() - 36.0, iw, 24.0);
+            let hv = ui.hit(ab, Act::ColAuto);
+            g.rrect(ab, 12.0, if auto { surf_active(g) } else { surf(g, hv) });
+            if auto {
+                let tw = g.measure(al, 11.5, 600);
+                g.icon(ic::CHECK, R::new(ab.cx() - tw / 2.0 - 16.0, ab.y, 12.0, ab.h), 9.0, WHITE);
+            }
+            g.text(al, ab, 11.5, if auto { 600 } else { 500 }, if auto { WHITE } else { T2 }, Al::C);
+        }
     }
 
     /// Mini lyrics are on and this track's synced lyrics are here.
@@ -1801,6 +2546,19 @@ impl App {
                         from_h: self.sh.t,
                         dir: (idx(b) - idx(a)).signum(),
                         t: 0.0,
+                        sub: false,
+                    });
+                }
+                // Settings <-> Colors: the next page glides in from the right (back: from the left)
+                (ViewKey::Expanded(Tab::Settings, al), ViewKey::Expanded(Tab::Settings, bl)) if al != bl && self.view_age > 0.05 => {
+                    self.slide = Some(Slide {
+                        from_tab: Tab::Settings,
+                        from_lyr: al,
+                        from_w: self.sw.t,
+                        from_h: self.sh.t,
+                        dir: if bl { 1.0 } else { -1.0 },
+                        t: 0.0,
+                        sub: true,
                     });
                 }
                 _ => {
@@ -1823,7 +2581,8 @@ impl App {
             self.view = key;
         }
         if let Some(sl) = &mut self.slide {
-            sl.t += dt / SLIDE_SECS;
+            // a page inside the tab takes a little longer: it cross-fades as it glides
+            sl.t += dt / if sl.sub { SLIDE_SECS * 1.25 } else { SLIDE_SECS };
             if sl.t >= 1.0 {
                 self.slide = None;
             }
@@ -2307,7 +3066,7 @@ impl App {
             }
             Live::Task => {
                 let Some((_, due, now_due)) = self.task_line() else { return };
-                let col = if now_due { RED } else { TASK_C };
+                let col = if now_due { RED } else { feat(g, Tab::Tasks) };
                 g.icon(ic::TASKS, R::new(r.x + 10.0, r.y, 18.0, r.h), 12.0, col);
                 g.text(&due, R::new(r.x + 31.0, r.y, r.w - 31.0, r.h), 12.0, 600, col, Al::L);
                 ui.hit(r, Act::Tab(Tab::Tasks));
@@ -2373,7 +3132,7 @@ impl App {
             }
             Live::Task => {
                 let Some((text, due, now_due)) = self.task_line() else { return };
-                let col = if now_due { RED } else { TASK_C };
+                let col = if now_due { RED } else { feat(g, Tab::Tasks) };
                 g.icon(ic::TASKS, R::new(c.x + 10.0, c.y, 20.0, c.h), 13.0, col);
                 let dw = g.measure(&due, 12.0, 600);
                 g.text(&due, R::new(c.right() - 14.0 - dw, c.y, dw + 2.0, c.h), 12.0, 600, col, Al::R);
@@ -2516,7 +3275,15 @@ impl App {
             } else if hv {
                 g.rrect(b, 10.0, surf(g, true));
             }
-            let col = if active { active_icon(g, tab_color(g, *t)) } else if hv { WHITE } else { T3 };
+            // a feature with its own color (a ready-made look, or picked on the Colors page)
+            // shows it on its tab icon even while that tab is not open
+            let own = g.theme.feature[i];
+            let col = match own {
+                _ if active => tab_color(g, *t),
+                Some(c) => c.a(if hv { 1.0 } else { 0.8 }),
+                None if hv => WHITE,
+                None => T3,
+            };
             draw_tab_icon(g, *t, b, col);
         }
         // right: battery, date, clock
@@ -2542,18 +3309,29 @@ impl App {
             Some(sl) => {
                 // Slide between features: the old page leaves to one side while the new one
                 // comes in from the other. Hits are suppressed until the slide finishes.
-                let p = 1.0 - (1.0 - sl.t.clamp(0.0, 1.0)).powi(3);
-                // pages sit side by side (carousel), so they never overlap
-                let dist = (c.w + sl.from_w) / 2.0 + 24.0;
+                let t = sl.t.clamp(0.0, 1.0);
+                // eases out: moves at once, lands softly
+                let p = 1.0 - (1.0 - t).powi(3);
+                // pages sit side by side (carousel), so they never overlap; a page inside the
+                // same tab only glides a little while the two cross-fade
+                let dist = if sl.sub { 36.0 } else { (c.w + sl.from_w) / 2.0 + 24.0 };
+                let (old_o, new_o) = if sl.sub {
+                    // one after the other, barely overlapping, so the two pages never mix
+                    let out = 1.0 - (t / 0.35).min(1.0);
+                    let inn = ((t - 0.25) / 0.55).clamp(0.0, 1.0);
+                    (out * out, inn * inn * (3.0 - 2.0 * inn))
+                } else {
+                    ((1.0 - p * 1.2).max(0.0), (0.25 + p).min(1.0))
+                };
                 let mut dummy = Ui { hits: Vec::new(), mouse: None };
                 let old_c = R::new(c.cx() - sl.from_w / 2.0, c.y, sl.from_w, sl.from_h);
                 let all = R::new(-1e4, -1e4, 2e4, 2e4);
                 g.translate(-sl.dir * dist * p, 0.0);
-                g.push_rr(all, 0.0, (1.0 - p * 1.2).max(0.0));
+                g.push_rr(all, 0.0, old_o);
                 self.draw_body(g, &mut dummy, old_c, sl.from_tab, sl.from_lyr);
                 g.pop();
                 g.translate(sl.dir * dist * (1.0 - p), 0.0);
-                g.push_rr(all, 0.0, (0.25 + p).min(1.0));
+                g.push_rr(all, 0.0, new_o);
                 self.draw_body(g, &mut dummy, c, tab, lyr);
                 g.pop();
                 g.translate(0.0, 0.0);
@@ -2571,6 +3349,7 @@ impl App {
             Tab::Shelf => self.draw_shelf(g, ui, body),
             Tab::Tasks => self.draw_tasks(g, ui, body),
             Tab::Clipboard => self.draw_clipboard(g, ui, body),
+            Tab::Settings if lyr => self.draw_colors(g, ui, body),
             Tab::Settings => self.draw_settings(g, ui, body),
         }
     }
@@ -2615,7 +3394,7 @@ impl App {
         if mini || hv {
             g.rrect(mb, 10.0, if mini { g.theme.button_active.unwrap_or(acc.a(0.22)) } else { surf(g, false) });
         }
-        let mc = if mini { active_icon(g, acc) } else { T2 };
+        let mc = g.ico(if mini { active_icon(g, acc) } else { T2 });
         g.rrect(R::new(mb.cx() - 7.0, mb.cy() - 6.5, 14.0, 5.0), 2.5, mc);
         g.line(mb.cx() - 6.0, mb.cy() + 2.0, mb.cx() + 6.0, mb.cy() + 2.0, 1.6, mc);
         g.line(mb.cx() - 4.0, mb.cy() + 5.5, mb.cx() + 4.0, mb.cy() + 5.5, 1.6, mc.a(0.7));
@@ -2794,9 +3573,9 @@ impl App {
             g.fill_geo(&geo, WHITE.a(0.07));
             g.push_geo(&geo, 1.0);
             let fh = dr.h * f;
-            g.rect(R::new(dr.x - 2.0, dr.bottom() - fh, dr.w + 4.0, fh + 2.0), WATER_C.a(0.9));
+            g.rect(R::new(dr.x - 2.0, dr.bottom() - fh, dr.w + 4.0, fh + 2.0), feat(g, Tab::Water).a(0.9));
             g.pop();
-            g.stroke_geo(&geo, WATER_C.a(0.5), 1.5);
+            g.stroke_geo(&geo, feat(g, Tab::Water).a(0.5), 1.5);
         }
         g.text(&format!("{}%", (f * 100.0).round() as i32), R::new(dr.x, dr.y + 50.0, dr.w, 22.0), 14.0, 700, WHITE, Al::C);
 
@@ -2809,7 +3588,7 @@ impl App {
         let bar = R::new(x, c.y + 34.0, cw, 6.0);
         g.rrect(bar, 3.0, WHITE.a(0.12));
         if f > 0.0 {
-            g.rrect(R::new(bar.x, bar.y, (bar.w * f).max(6.0), 6.0), 3.0, WATER_C);
+            g.rrect(R::new(bar.x, bar.y, (bar.w * f).max(6.0), 6.0), 3.0, feat(g, Tab::Water));
         }
         let note = match self.next_water_in() {
             None => "Daily goal reached — nice work!".to_string(),
@@ -2826,7 +3605,7 @@ impl App {
             }
             g.text("Reminders", R::new(sr.x + 8.0, sr.y, 64.0, sr.h), 11.5, 500, btn_fg(g, if on { T2 } else { T3 }), Al::L);
             let track = R::new(sr.right() - 38.0, sr.cy() - 8.0, 30.0, 16.0);
-            g.rrect(track, 8.0, if on { accent_btn(g, WATER_C) } else { WHITE.a(0.22) });
+            g.rrect(track, 8.0, if on { accent_btn(g, feat(g, Tab::Water)) } else { WHITE.a(0.22) });
             let kx = if on { track.right() - 8.0 } else { track.x + 8.0 };
             g.circle(kx, track.cy(), 6.0, if on { accent_fg(g) } else { WHITE.a(0.9) });
         }
@@ -2837,7 +3616,7 @@ impl App {
         let hv1 = ui.hover(b1);
         pill_btn(g, ui, b1, "+250 ml", btn_fg(g, WHITE), surf(g, hv1), Act::WaterAdd(250));
         let b2 = R::new(x + 94.0, by, 150.0, 32.0);
-        pill_btn(g, ui, b2, &format!("+ Bottle · {} ml", w.bottle_ml), accent_fg(g), accent_btn(g, WATER_C), Act::WaterAdd(w.bottle_ml));
+        pill_btn(g, ui, b2, &format!("+ Bottle · {} ml", w.bottle_ml), accent_fg(g), accent_btn(g, feat(g, Tab::Water)), Act::WaterAdd(w.bottle_ml));
         let mut cx2 = x + 252.0;
         if !w.log.is_empty() {
             icon_btn(g, ui, R::new(cx2, by, 34.0, 32.0), ic::UNDO, 14.0, WHITE, Act::WaterUndo, true);
@@ -2849,14 +3628,14 @@ impl App {
         match self.edit_of(Field::DrinkMl) {
             Some((buf, caret)) => {
                 g.rrect(cr, 16.0, WHITE.a(0.12));
-                g.rrect_stroke(cr.inset(0.5, 0.5), 15.5, WATER_C.a(0.7), 1.2, false);
+                g.rrect_stroke(cr.inset(0.5, 0.5), 15.5, feat(g, Tab::Water).a(0.7), 1.2, false);
                 let txt = format!("{buf} ml");
                 let tw = g.measure(&txt, 12.5, 600);
                 let tx = cr.cx() - tw / 2.0;
                 g.text(&txt, R::new(tx, cr.y, tw + 4.0, cr.h), 12.5, 600, WHITE, Al::L);
                 if caret {
                     let bw = g.measure(buf, 12.5, 600);
-                    g.line(tx + bw + 1.0, cr.cy() - 7.0, tx + bw + 1.0, cr.cy() + 7.0, 1.3, WATER_C);
+                    g.line(tx + bw + 1.0, cr.cy() - 7.0, tx + bw + 1.0, cr.cy() + 7.0, 1.3, feat(g, Tab::Water));
                 }
             }
             None => {
@@ -2877,9 +3656,9 @@ impl App {
         let files = &self.data.shelf;
         if files.is_empty() {
             let r = c.inset(2.0, 2.0);
-            g.rrect(r, 16.0, if self.drag_hover { SHELF_C.a(0.12) } else { WHITE.a(0.03) });
-            g.rrect_stroke(r, 16.0, if self.drag_hover { SHELF_C } else { WHITE.a(0.22) }, 1.5, true);
-            g.icon(ic::FOLDER, R::new(r.x, r.y + 18.0, r.w, 34.0), 24.0, if self.drag_hover { SHELF_C } else { T2 });
+            g.rrect(r, 16.0, if self.drag_hover { feat(g, Tab::Shelf).a(0.12) } else { WHITE.a(0.03) });
+            g.rrect_stroke(r, 16.0, if self.drag_hover { feat(g, Tab::Shelf) } else { WHITE.a(0.22) }, 1.5, true);
+            g.icon(ic::FOLDER, R::new(r.x, r.y + 18.0, r.w, 34.0), 24.0, if self.drag_hover { feat(g, Tab::Shelf) } else { T2 });
             g.text(
                 if self.drag_hover { "Release to add to the shelf" } else { "Drop files here" },
                 R::new(r.x, r.y + 56.0, r.w, 22.0),
@@ -2915,8 +3694,8 @@ impl App {
             let hv = if whole { ui.hit(t, Act::ShelfItem(k)) } else { false };
             let sel = self.shelf_sel.contains(path);
             if sel {
-                g.rrect(t, 14.0, if hv { SHELF_C.a(0.28) } else { SHELF_C.a(0.16) });
-                g.rrect_stroke(t.inset(0.75, 0.75), 13.5, SHELF_C.a(0.85), 1.5, false);
+                g.rrect(t, 14.0, if hv { feat(g, Tab::Shelf).a(0.28) } else { feat(g, Tab::Shelf).a(0.16) });
+                g.rrect_stroke(t.inset(0.75, 0.75), 13.5, feat(g, Tab::Shelf).a(0.85), 1.5, false);
             } else {
                 g.rrect(t, 14.0, surf(g, hv));
             }
@@ -2936,20 +3715,22 @@ impl App {
                 if !e.is_empty() {
                     let lw = g.measure(&e, 8.5, 700) + 8.0;
                     let lr = R::new(pr.right() - lw - 3.0, pr.bottom() - 15.0, lw, 12.0);
-                    g.rrect(lr, 4.0, ext_color(&ext).a(0.92));
-                    g.text(&e, lr, 8.5, 700, WHITE, Al::C);
+                    let bc = ext_color(g, &ext);
+                    g.rrect(lr, 4.0, bc.a(0.92));
+                    g.text(&e, lr, 8.5, 700, on_color(bc), Al::C);
                 }
             } else if is_dir {
-                g.icon(ic::FOLDER, badge, 28.0, SHELF_C);
+                g.icon(ic::FOLDER, badge, 28.0, feat(g, Tab::Shelf));
             } else {
-                let bc = ext_color(&ext);
+                let bc = ext_color(g, &ext);
+                let fg = on_color(bc);
                 g.rrect(badge, 7.0, bc.a(0.9));
-                g.rrect(R::new(badge.right() - 10.0, badge.y, 10.0, 10.0), 3.0, WHITE.a(0.35));
+                g.rrect(R::new(badge.right() - 10.0, badge.y, 10.0, 10.0), 3.0, PURE_WHITE.a(0.35));
                 let e: String = ext.chars().take(4).collect();
                 if e.is_empty() {
-                    g.icon(ic::DOC, badge, 16.0, WHITE);
+                    g.icon(ic::DOC, badge, 16.0, fg);
                 } else {
-                    g.text(&e, R::new(badge.x, badge.y + 14.0, badge.w, 20.0), 10.0, 700, WHITE, Al::C);
+                    g.text(&e, R::new(badge.x, badge.y + 14.0, badge.w, 20.0), 10.0, 700, fg, Al::C);
                 }
             }
             g.text_wrap(&name, R::new(t.x + 6.0, t.y + 56.0, t.w - 12.0, 32.0), 11.0, 500, WHITE.a(0.85), Al::C);
@@ -2958,7 +3739,7 @@ impl App {
                 let cr = R::new(t.x + 4.0, t.y + 4.0, 18.0, 18.0);
                 let ch = ui.hit(cr, Act::ShelfCheck(k));
                 if sel {
-                    g.circle(cr.cx(), cr.cy(), 9.0, SHELF_C);
+                    g.circle(cr.cx(), cr.cy(), 9.0, feat(g, Tab::Shelf));
                     g.icon(ic::CHECK, cr, 9.0, BLACK);
                 } else {
                     g.circle(cr.cx(), cr.cy(), 9.0, BLACK.a(0.6));
@@ -2994,24 +3775,24 @@ impl App {
         } else {
             format!("{} item{} · click to open · Ctrl+click to select", files.len(), if files.len() == 1 { "" } else { "s" })
         };
-        g.text(&info, R::new(c.x, fy, c.w - 200.0, 20.0), 11.5, 400, if nsel > 0 { SHELF_C.mix(WHITE, 0.4) } else { T3 }, Al::L);
+        g.text(&info, R::new(c.x, fy, c.w - 200.0, 20.0), 11.5, 400, if nsel > 0 { feat(g, Tab::Shelf).mix(WHITE, 0.4) } else { T3 }, Al::L);
         // press and drag this to carry every file on the shelf at once
         let dr = R::new(c.right() - 74.0 - 8.0 - 100.0, fy - 2.0, 100.0, 24.0);
         let hv = ui.hit(dr, Act::ShelfAll);
         if nsel > 0 {
-            let ac = accent_btn(g, SHELF_C);
+            let ac = accent_btn(g, feat(g, Tab::Shelf));
             g.rrect(dr, 12.0, if hv { ac.mix(WHITE, 0.2) } else { ac });
             g.text("Deselect", dr, 11.5, 700, accent_fg(g), Al::C);
         } else {
-            g.rrect(dr, 12.0, if hv { SHELF_C.a(0.35) } else { SHELF_C.a(0.18) });
-            g.text(&format!("Drag all ({})", files.len()), dr, 11.5, 600, SHELF_C.mix(WHITE, 0.35), Al::C);
+            g.rrect(dr, 12.0, if hv { feat(g, Tab::Shelf).a(0.35) } else { feat(g, Tab::Shelf).a(0.18) });
+            g.text(&format!("Drag all ({})", files.len()), dr, 11.5, 600, feat(g, Tab::Shelf).mix(WHITE, 0.35), Al::C);
         }
         let cr = R::new(c.right() - 74.0, fy - 2.0, 74.0, 24.0);
         let hv = ui.hit(cr, Act::ShelfClear);
         g.rrect(cr, 12.0, if hv { RED.a(0.25) } else { surf(g, false) });
         g.text("Clear all", cr, 11.5, 600, if hv { RED } else { btn_fg(g, T2) }, Al::C);
         if self.drag_hover {
-            g.rrect_stroke(c.inset(-4.0, -4.0), 16.0, SHELF_C, 1.5, true);
+            g.rrect_stroke(c.inset(-4.0, -4.0), 16.0, feat(g, Tab::Shelf), 1.5, true);
         }
     }
 
@@ -3054,6 +3835,7 @@ impl App {
             Field::Goal => w.goal_ml.to_string(),
             Field::Interval => w.interval_min.to_string(),
             Field::DrinkMl => String::new(),
+            Field::Hex => theme::hex(self.col_color()),
             Field::TaskTime => self.draft_due().map(hm).unwrap_or_default(),
         };
         self.edit = Some(Edit { field: f, buf, fresh: true });
@@ -3069,6 +3851,17 @@ impl App {
         let Some(e) = self.edit.take() else { return };
         let t = e.buf.trim().to_string();
         match e.field {
+            Field::Hex => {
+                let h = t.trim_start_matches('#');
+                // #ABC is short for #AABBCC
+                let full = if h.len() == 3 { h.chars().flat_map(|c| [c, c]).collect() } else { h.to_string() };
+                if full.len() == 6 {
+                    if let Some(c) = theme::color(&full) {
+                        self.col_hsv = theme::to_hsv(c);
+                        self.col_apply(c, true);
+                    }
+                }
+            }
             Field::TaskTime => {
                 if let Some(v) = parse_due_on(&t, now().secs, self.sel_day) {
                     self.task_due = v;
@@ -3094,7 +3887,7 @@ impl App {
                             self.water_mark = Instant::now();
                         }
                     }
-                    Field::TaskTime => {}
+                    Field::TaskTime | Field::Hex => {}
                 }
                 self.dirty = true;
             }
@@ -3127,12 +3920,12 @@ impl App {
         if self.clips.is_empty() {
             if drop {
                 let r = c.inset(2.0, 2.0);
-                g.rrect(r, 16.0, CLIP_C.a(0.12));
-                g.rrect_stroke(r, 16.0, CLIP_C, 1.5, true);
+                g.rrect(r, 16.0, feat(g, Tab::Clipboard).a(0.12));
+                g.rrect_stroke(r, 16.0, feat(g, Tab::Clipboard), 1.5, true);
             }
             // icon 34 + gap 6 + title 22 + subtitle 18, centered in the body
             let y = c.y + ((c.h - 80.0) / 2.0).max(0.0);
-            g.icon(ic::CLIP, R::new(c.x, y, c.w, 34.0), 24.0, if drop { CLIP_C } else { T3 });
+            g.icon(ic::CLIP, R::new(c.x, y, c.w, 34.0), 24.0, if drop { feat(g, Tab::Clipboard) } else { T3 });
             let title = if drop { "Release to save the text" } else { "Nothing copied yet" };
             g.text(title, R::new(c.x, y + 40.0, c.w, 22.0), 14.0, 600, if drop { WHITE } else { T2 }, Al::C);
             g.text("Text you copy or drop on Veyra shows up here. Click an entry to copy it again.", R::new(c.x, y + 62.0, c.w, 18.0), 11.5, 400, T3, Al::C);
@@ -3150,14 +3943,14 @@ impl App {
         g.text(&head, R::new(c.x + 2.0, c.y, room, 24.0), 11.5, 400, T3, Al::L);
         let done = self.clip_all_at.map(|t| t.elapsed() < Duration::from_millis(1400)).unwrap_or(false);
         let hv = ui.hit(ar, Act::ClipCopyAll);
-        g.rrect(ar, 12.0, if hv || done { CLIP_C.a(0.3) } else { CLIP_C.a(0.16) });
+        g.rrect(ar, 12.0, if hv || done { feat(g, Tab::Clipboard).a(0.3) } else { feat(g, Tab::Clipboard).a(0.16) });
         if done {
             let tw = g.measure("Copied", 11.5, 600);
             let x = ar.cx() - (tw + 14.0) / 2.0;
-            g.icon(ic::CHECK, R::new(x, ar.y, 10.0, ar.h), 10.0, CLIP_C.mix(WHITE, 0.35));
-            g.text("Copied", R::new(x + 14.0, ar.y, tw + 2.0, ar.h), 11.5, 600, CLIP_C.mix(WHITE, 0.35), Al::L);
+            g.icon(ic::CHECK, R::new(x, ar.y, 10.0, ar.h), 10.0, feat(g, Tab::Clipboard).mix(WHITE, 0.35));
+            g.text("Copied", R::new(x + 14.0, ar.y, tw + 2.0, ar.h), 11.5, 600, feat(g, Tab::Clipboard).mix(WHITE, 0.35), Al::L);
         } else {
-            g.text("Copy all", ar, 11.5, 600, CLIP_C.mix(WHITE, 0.35), Al::C);
+            g.text("Copy all", ar, 11.5, 600, feat(g, Tab::Clipboard).mix(WHITE, 0.35), Al::C);
         }
         let hv = ui.hit(cr, Act::ClipClear);
         g.rrect(cr, 12.0, if hv { RED.a(0.25) } else { surf(g, false) });
@@ -3186,8 +3979,8 @@ impl App {
                 None
             };
             if let Some(m) = mark {
-                g.icon(ic::CHECK, R::new(r.right() - 62.0, r.y, 16.0, r.h), 10.0, CLIP_C);
-                g.text(m, R::new(r.right() - 46.0, r.y, 42.0, r.h), 11.5, 600, CLIP_C, Al::L);
+                g.icon(ic::CHECK, R::new(r.right() - 62.0, r.y, 16.0, r.h), 10.0, feat(g, Tab::Clipboard));
+                g.text(m, R::new(r.right() - 46.0, r.y, 42.0, r.h), 11.5, 600, feat(g, Tab::Clipboard), Al::L);
             } else if hv {
                 let xr = R::new(r.right() - 30.0, r.y + 2.0, 26.0, r.h - 4.0);
                 let xh = ui.hit(xr, Act::ClipDel(k));
@@ -3205,7 +3998,7 @@ impl App {
             g.text(&shown, R::new(c.x, c.bottom() - 2.0, c.w - 4.0, 14.0), 10.5, 500, T3, Al::R);
         }
         if drop {
-            g.rrect_stroke(c.inset(-4.0, -4.0), 16.0, CLIP_C, 1.5, true);
+            g.rrect_stroke(c.inset(-4.0, -4.0), 16.0, feat(g, Tab::Clipboard), 1.5, true);
         }
     }
 
@@ -3282,7 +4075,7 @@ impl App {
         let tw = g.measure(&title, 12.5, 600);
         let tr = R::new(r.x, r.y, tw + 10.0, 22.0);
         let th = ui.hit(tr, Act::CalToday);
-        g.text(&title, R::new(r.x + 4.0, r.y, tw + 4.0, 22.0), 12.5, 600, if th { TASK_C } else { WHITE }, Al::L);
+        g.text(&title, R::new(r.x + 4.0, r.y, tw + 4.0, 22.0), 12.5, 600, if th { feat(g, Tab::Tasks) } else { WHITE }, Al::L);
         let nr = R::new(r.right() - 22.0, r.y, 22.0, 22.0);
         let pr = R::new(nr.x - 24.0, r.y, 22.0, 22.0);
         icon_btn(g, ui, pr, ic::LEFT, 9.0, T2, Act::CalMonth(-1), false);
@@ -3321,17 +4114,17 @@ impl App {
             let sel = day == self.sel_day;
             let in_month = day >= first && day < next;
             if sel {
-                g.circle(cx, cy, rad, accent_btn(g, TASK_C));
+                g.circle(cx, cy, rad, accent_btn(g, feat(g, Tab::Tasks)));
             } else if hv {
                 g.circle(cx, cy, rad, surf(g, true));
             }
             if day == today && !sel {
-                g.circle_stroke(cx, cy, rad - 0.6, TASK_C.a(0.85), 1.2);
+                g.circle_stroke(cx, cy, rad - 0.6, feat(g, Tab::Tasks).a(0.85), 1.2);
             }
             let fg = if sel {
                 accent_fg(g)
             } else if day == today {
-                TASK_C
+                feat(g, Tab::Tasks)
             } else if !in_month {
                 WHITE.a(0.22)
             } else if day < today {
@@ -3354,7 +4147,7 @@ impl App {
                 } else if over {
                     RED
                 } else if open {
-                    TASK_C
+                    feat(g, Tab::Tasks)
                 } else {
                     T3
                 };
@@ -3377,7 +4170,7 @@ impl App {
         let hv = ui.hit(field, Act::TaskField);
         g.rrect(field, 10.0, if self.input_focus { WHITE.a(0.12) } else { surf(g, hv) });
         if self.input_focus {
-            g.rrect_stroke(field, 10.0, TASK_C.a(0.6), 1.2, false);
+            g.rrect_stroke(field, 10.0, feat(g, Tab::Tasks).a(0.6), 1.2, false);
         }
         let inner = field.inset(12.0, 0.0);
         if self.input.is_empty() && !self.input_focus {
@@ -3389,13 +4182,13 @@ impl App {
             g.text(&self.input, R::new(inner.x - off, inner.y, tw + 50.0, inner.h), 13.0, 400, WHITE, Al::L);
             if self.input_focus && (self.t0.elapsed().as_millis() / 530) % 2 == 0 {
                 let cx = inner.x - off + tw + 1.0;
-                g.line(cx, inner.y + 8.0, cx, inner.bottom() - 8.0, 1.5, TASK_C);
+                g.line(cx, inner.y + 8.0, cx, inner.bottom() - 8.0, 1.5, feat(g, Tab::Tasks));
             }
             g.pop();
         }
         let ar = R::new(c.right() - 32.0, c.y, 32.0, 30.0);
         let ah = ui.hit(ar, Act::TaskAdd);
-        let ac = accent_btn(g, TASK_C);
+        let ac = accent_btn(g, feat(g, Tab::Tasks));
         g.rrect(ar, 10.0, if ah { ac } else { ac.a(0.85) });
         g.icon(ic::ADD, ar, 12.0, accent_fg(g));
 
@@ -3415,7 +4208,7 @@ impl App {
             (Some(e), _) => value_box(g, mid, "", Some(e), false, 11.5),
             (None, Some(d)) => {
                 let label = if d.div_euclid(86400) == self.sel_day { hm(d) } else { due_label(d, today) };
-                g.text(&label, mid, 11.5, 600, if th { WHITE } else { TASK_C }, Al::C);
+                g.text(&label, mid, 11.5, 600, if th { WHITE } else { feat(g, Tab::Tasks) }, Al::C);
             }
             (None, None) => g.text("No time", mid, 11.0, 500, if th { WHITE } else { T3 }, Al::C),
         }
@@ -3462,7 +4255,7 @@ impl App {
             }
             let cb = R::new(r.x + 2.0, r.y, 28.0, r.h);
             let ch = ui.hit(cb, Act::TaskToggle(t.id));
-            g.icon(if t.done { ic::BOX_ON } else { ic::BOX }, cb, 15.0, if t.done { TASK_C } else if ch { WHITE } else { T2 });
+            g.icon(if t.done { ic::BOX_ON } else { ic::BOX }, cb, 15.0, if t.done { feat(g, Tab::Tasks) } else if ch { WHITE } else { T2 });
             let overdue = !t.done && t.due.map(|d| d <= n.secs).unwrap_or(false);
             let label = t.due.map(|d| if d.div_euclid(86400) == sel { hm(d) } else { due_label(d, today) });
             let due_w = label.as_ref().map(|l| g.measure(l, 12.0, 600) + 6.0).unwrap_or(0.0);
@@ -3471,10 +4264,10 @@ impl App {
             if t.done {
                 let tw = g.measure(&t.text, 13.0, 400);
                 let (x0, x1) = ((txt.x - off).max(txt.x), (txt.x - off + tw).min(txt.right()));
-                g.line(x0, r.cy(), x1, r.cy(), 1.2, T3);
+                g.line(x0, r.cy(), x1, r.cy(), 1.2, g.txt(T3));
             }
             if let Some(l) = &label {
-                g.text(l, R::new(r.right() - due_w - 28.0, r.y, due_w, r.h), 12.0, 600, if t.done { T3 } else if overdue { RED } else { TASK_C }, Al::R);
+                g.text(l, R::new(r.right() - due_w - 28.0, r.y, due_w, r.h), 12.0, 600, if t.done { T3 } else if overdue { RED } else { feat(g, Tab::Tasks) }, Al::R);
             }
             if hv {
                 let xr = R::new(r.right() - 26.0, r.y + 3.0, 24.0, r.h - 6.0);
@@ -3523,6 +4316,7 @@ impl App {
         match a {
             Act::Tab(t) => {
                 if t != Tab::Settings {
+                    // the Colors page stays open: come back to Settings and it is still there
                     self.cancel_hk_capture();
                 }
                 self.shelf_sel.clear();
@@ -3703,6 +4497,44 @@ impl App {
             }
             Act::TaskTime(d) => self.adjust_due(d),
             Act::Edit(f) => self.start_edit(f),
+            Act::ColBack => self.colors_open = false,
+            Act::SetCat(i) => {
+                if i != 2 {
+                    self.cancel_hk_capture();
+                }
+                self.settings_cat = i;
+            }
+            Act::ColTarget(t) => {
+                self.col_target = t;
+                self.col_hsv = theme::to_hsv(self.col_color());
+            }
+            Act::ColPreset(i) => self.col_preset(i),
+            Act::ColCopy => self.col_copy(),
+            Act::ColPaste => self.col_paste(),
+            Act::ColSwatch(hx) => {
+                if let Some(c) = theme::color(&theme::hex(C::hex(hx))) {
+                    self.col_hsv = theme::to_hsv(c);
+                    self.col_apply(c, true);
+                }
+            }
+            Act::ColWheel(_) | Act::ColBright(_) => {}
+            Act::ColAuto => {
+                let kv: Vec<(&str, String)> = match self.col_target {
+                    1 => vec![("expanded_mode", "same".into())],
+                    2 => vec![("button_accent", "auto".into())],
+                    COL_ICONS => vec![("icon", "auto".into())],
+                    COL_TEXT => vec![("text", "auto".into()), ("expanded_text", "auto".into())],
+                    n => vec![(theme::FEATURE_KEYS[(n as usize - 3).min(6)], "auto".into())],
+                };
+                self.col_set(&kv, true);
+                self.col_hsv = theme::to_hsv(self.col_color());
+            }
+            Act::ColReset => {
+                let all = theme::defaults();
+                let kv: Vec<(&str, String)> = all.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+                self.col_set(&kv, true);
+                self.col_hsv = theme::to_hsv(self.col_color());
+            }
             Act::TaskAdd => self.add_task(),
             Act::TaskToggle(id) => {
                 if let Some(t) = self.data.tasks.iter_mut().find(|t| t.id == id) {
@@ -3889,7 +4721,7 @@ impl App {
                 self.shelf_scroll = self.shelf_max();
                 self.dirty = true;
                 let title = if count == 1 { "Screenshot added to Shelf".to_string() } else { format!("{count} screenshots added to Shelf") };
-                self.toast(TIcon::G(ic::FOLDER), &title, "Drag it anywhere from the Shelf", 4.0, SHELF_C, Some(Tab::Shelf));
+                self.toast(TIcon::G(ic::FOLDER), &title, "Drag it anywhere from the Shelf", 4.0, feat(&self.gfx, Tab::Shelf), Some(Tab::Shelf));
                 redraw = true;
             }
         }
@@ -3968,6 +4800,7 @@ impl App {
                 match what {
                     "found" => self.lyr = std::mem::replace(&mut self.demo_lyrics, Lyr::None),
                     "collapse" => self.collapse(),
+                    "tocolors" => self.open_colors(),
                     "expand" => self.expand(Some(Tab::Media)),
                     "hover" => {
                         self.mouse = Some((self.screen_cx, 12.0));
@@ -4117,7 +4950,7 @@ impl App {
             self.water_mark = Instant::now();
             let msg = format!("{} / {} ml today · tap to log", w.total(), w.goal_ml);
             sound::chime();
-            self.toast(TIcon::Drop, "Time to drink some water", &msg, 10.0, WATER_C, Some(Tab::Water));
+            self.toast(TIcon::Drop, "Time to drink some water", &msg, 10.0, feat(&self.gfx, Tab::Water), Some(Tab::Water));
         }
 
         // task reminders: 1 day, 6 h, 3 h, 1 h and 30 min before, and when due. Not while
@@ -4173,7 +5006,7 @@ impl App {
         if !due.is_empty() {
             sound::chime();
             let sub = if due.len() == 1 { due[0].clone() } else { format!("{} and {} more", due[0], due.len() - 1) };
-            self.toast(TIcon::G(ic::TASKS), "Task due now", &sub, 12.0, TASK_C, Some(Tab::Tasks));
+            self.toast(TIcon::G(ic::TASKS), "Task due now", &sub, 12.0, feat(&self.gfx, Tab::Tasks), Some(Tab::Tasks));
         } else if !soon.is_empty() {
             // the most pressing one leads
             soon.sort_by_key(|(_, d)| *d);
@@ -4185,7 +5018,7 @@ impl App {
                 (format!("{} tasks due soon", soon.len()), format!("{text} · {when} and {} more", soon.len() - 1))
             };
             sound::chime();
-            self.toast(TIcon::G(ic::TASKS), &title, &sub, 12.0, TASK_C, Some(Tab::Tasks));
+            self.toast(TIcon::G(ic::TASKS), &title, &sub, 12.0, feat(&self.gfx, Tab::Tasks), Some(Tab::Tasks));
         }
     }
 
@@ -4421,6 +5254,9 @@ impl App {
         if self.expanded {
             self.panel_entered = true;
         }
+        if let Some((Some(a @ (Act::ColWheel(_) | Act::ColBright(_))), _, _)) = self.press {
+            self.col_drag(a, p, false);
+        }
         if let Some((Some(a), sx, sy)) = self.press {
             if (p.0 - sx).abs() + (p.1 - sy).abs() > 6.0 {
                 let paths: Vec<String> = match a {
@@ -4501,9 +5337,14 @@ impl App {
     pub fn on_ldown(&mut self, lp: LPARAM) {
         let p = self.local(lp);
         self.mouse = Some(p);
-        self.press = Some((self.hit_at(p), p.0, p.1));
+        let hit = self.hit_at(p);
+        self.press = Some((hit, p.0, p.1));
         unsafe {
             SetCapture(self.hwnd);
+        }
+        if let Some(a @ (Act::ColWheel(_) | Act::ColBright(_))) = hit {
+            self.commit_edit();
+            self.col_drag(a, p, false);
         }
     }
 
@@ -4513,6 +5354,11 @@ impl App {
             let _ = ReleaseCapture();
         }
         let Some((hit, _, _)) = self.press.take() else { return };
+        // the color wheel / brightness bar: wherever the mouse is let go, that color stays
+        if let Some(a @ (Act::ColWheel(_) | Act::ColBright(_))) = hit {
+            self.col_drag(a, p, true);
+            return;
+        }
         // released somewhere else than where it was pressed: cancel
         if !self.cursor_inside() || self.hit_at(p) != hit {
             return;
@@ -4645,6 +5491,8 @@ impl App {
                 self.edit = None;
             } else if self.input_focus {
                 self.input_focus = false;
+            } else if self.expanded && self.colors_open && self.tab == Tab::Settings {
+                self.colors_open = false;
             } else if self.expanded {
                 self.collapse();
             }
@@ -4655,6 +5503,14 @@ impl App {
     }
 
     pub fn on_char(&mut self, ch: u32) {
+        let on_colors = self.expanded && self.tab == Tab::Settings && self.colors_open;
+        if on_colors && (self.edit.is_none() || self.edit.as_ref().map(|e| e.field) == Some(Field::Hex)) {
+            match ch {
+                0x03 | 0x18 => return self.col_copy(),
+                0x16 => return self.col_paste(),
+                _ => {}
+            }
+        }
         if let Some(e) = &mut self.edit {
             match ch {
                 0x08 => {
@@ -4669,12 +5525,14 @@ impl App {
                 _ => {
                     if let Some(c) = char::from_u32(ch) {
                         let c = c.to_ascii_lowercase();
-                        if c.is_ascii_digit() || ":.,hml ".contains(c) {
+                        let hex = e.field == Field::Hex;
+                        let ok = if hex { c.is_ascii_hexdigit() || c == '#' } else { c.is_ascii_digit() || ":.,hml ".contains(c) };
+                        if ok {
                             if e.fresh {
                                 e.buf.clear();
                                 e.fresh = false;
                             }
-                            if e.buf.len() < 10 {
+                            if e.buf.len() < if hex { 7 } else { 10 } {
                                 e.buf.push(c);
                             }
                         }
@@ -4721,6 +5579,10 @@ impl App {
     }
 
     fn reload_theme(&mut self) {
+        if self.colors_open {
+            // theme.conf edited by hand while the Colors page is open: keep working on that
+            self.col_text = theme::read_text();
+        }
         let th = theme::load();
         self.gfx.set_theme(&th);
         dbg_log("theme reloaded");
@@ -5036,10 +5898,15 @@ impl App {
 
 // ------------------------------------------------------------------ widgets
 
-fn tab_color(g: &Gfx, t: Tab) -> C {
+/// A feature's color: the one picked on the Colors page (theme.conf), else the built-in one.
+fn feat(g: &Gfx, t: Tab) -> C {
+    let i = TABS.iter().position(|x| *x == t).unwrap_or(0);
+    if let Some(c) = g.theme.feature[i] {
+        return c;
+    }
     match t {
         Tab::Media => WHITE,
-        Tab::Focus => g.theme.timer.unwrap_or(FOCUS_C),
+        Tab::Focus => FOCUS_C,
         Tab::Water => WATER_C,
         Tab::Shelf => SHELF_C,
         Tab::Tasks => TASK_C,
@@ -5048,20 +5915,75 @@ fn tab_color(g: &Gfx, t: Tab) -> C {
     }
 }
 
+/// The icon color of an open tab: a color picked for that feature wins, then theme.conf
+/// `icon_active`, then the built-in color.
+fn tab_color(g: &Gfx, t: Tab) -> C {
+    let i = TABS.iter().position(|x| *x == t).unwrap_or(0);
+    match g.theme.feature[i] {
+        Some(c) => c,
+        None => active_icon(g, feat(g, t)),
+    }
+}
+
 fn draw_tab_icon(g: &Gfx, t: Tab, r: R, col: C) {
+    draw_tab_icon_sized(g, t, r, col, 14.0);
+}
+
+/// A feature's icon at any size (the Colors page draws a small island).
+fn draw_tab_icon_sized(g: &Gfx, t: Tab, r: R, col: C, size: f32) {
     match t {
-        Tab::Media => g.icon(ic::MUSIC, r, 14.0, col),
-        Tab::Focus => g.icon(ic::TIMER, r, 14.0, col),
+        Tab::Media => g.icon(ic::MUSIC, r, size, col),
+        Tab::Focus => g.icon(ic::TIMER, r, size, col),
         Tab::Water => {
-            if let Some(geo) = g.drop_geo(R::new(r.cx() - 5.5, r.cy() - 7.5, 11.0, 15.0)) {
+            let (w, h) = (size * 11.0 / 14.0, size * 15.0 / 14.0);
+            if let Some(geo) = g.drop_geo(R::new(r.cx() - w / 2.0, r.cy() - h / 2.0, w, h)) {
                 g.fill_geo(&geo, g.legible(g.text_alpha(g.icon_color(col))));
             }
         }
-        Tab::Shelf => g.icon(ic::FOLDER, r, 14.0, col),
-        Tab::Tasks => g.icon(ic::TASKS, r, 14.0, col),
-        Tab::Clipboard => g.icon(ic::CLIP, r, 14.0, col),
-        Tab::Settings => g.icon(ic::GEAR, r, 14.0, col),
+        Tab::Shelf => g.icon(ic::FOLDER, r, size, col),
+        Tab::Tasks => g.icon(ic::TASKS, r, size, col),
+        Tab::Clipboard => g.icon(ic::CLIP, r, size, col),
+        Tab::Settings => g.icon(ic::GEAR, r, size, col),
     }
+}
+
+/// A lively version of a color for tints and glows: dark colors are lifted so a navy
+/// background still lights its tile blue (greys stay grey).
+fn vivid(c: C) -> C {
+    let (h, s, v) = theme::to_hsv(c);
+    nudge(theme::hsv(h, s, v.max(0.72)))
+}
+
+/// The ring around a picked tile: its own color, or a light ring for dark and grey colors.
+fn ring_color(c: C) -> C {
+    let (h, s, v) = theme::to_hsv(c);
+    if s < 0.15 {
+        WHITE.a(0.55)
+    } else {
+        nudge(theme::hsv(h, s.min(0.75), v.max(0.8)))
+    }
+}
+
+/// A color that is never exactly white (the renderer swaps pure white for the text color).
+fn nudge(c: C) -> C {
+    C(c.0.min(0.999), c.1, c.2, c.3)
+}
+
+/// Fills a rounded rectangle with background stops (one = solid; several = a gradient from
+/// the bottom up), the way the island paints its background.
+fn fill_stops(g: &Gfx, r: R, rad: f32, stops: &[(f32, C)]) {
+    if stops.len() < 2 {
+        g.rrect(r, rad, nudge(stops.first().map(|s| s.1).unwrap_or(BLACK)));
+        return;
+    }
+    g.push_rr(r, rad, 1.0);
+    let n = ((r.h / 2.0).ceil() as usize).max(8);
+    for k in 0..n {
+        let f = 1.0 - (k as f32 + 0.5) / n as f32;
+        let c = at_stop(stops, f);
+        g.rect(R::new(r.x, r.y + r.h * k as f32 / n as f32, r.w, r.h / n as f32 + 0.6), nudge(C(c.0, c.1, c.2, 1.0)));
+    }
+    g.pop();
 }
 
 /// Whether a key combination may become the mute shortcut. A global shortcut takes its keys
@@ -5120,28 +6042,84 @@ fn hotkey_name(mods: u32, vk: u32) -> String {
 fn draw_mic_off(g: &Gfx, r: R, size: f32, col: C) {
     g.icon(ic::MIC, r, size, col);
     let h = size * 0.62;
-    g.line(r.cx() - h, r.cy() - h, r.cx() + h, r.cy() + h, 1.6, col);
+    g.line(r.cx() - h, r.cy() - h, r.cx() + h, r.cy() + h, 1.6, g.ico(g.legible(g.text_alpha(col))));
 }
 
-/// One switch on the Settings page; `on: None` greys it out (nothing to switch).
-fn setting_row(g: &Gfx, ui: &mut Ui, r: R, label: &str, on: Option<bool>, opt: Opt, col: C) {
-    let hv = on.is_some() && ui.hit(r, Act::Opt(opt));
-    if hv {
-        g.rrect(r, 10.0, surf(g, false));
+/// A color from pasted text: #RRGGBB, RRGGBB, #RGB, or three numbers 0-255 (rgb(30, 79, 216)).
+fn parse_color_text(s: &str) -> Option<C> {
+    let s = s.trim();
+    let nums: Vec<f32> = s
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|x| !x.is_empty())
+        .filter_map(|x| x.parse::<f32>().ok())
+        .collect();
+    let low = s.to_ascii_lowercase();
+    if low.starts_with("rgb") || (nums.len() == 3 && s.contains(',')) {
+        if nums.len() >= 3 && nums[..3].iter().all(|n| *n <= 255.0) {
+            return theme::color(&format!("#{:02X}{:02X}{:02X}", nums[0] as u8, nums[1] as u8, nums[2] as u8));
+        }
+        return None;
     }
-    let fg = if on.is_some() { WHITE.a(0.9) } else { T3 };
-    g.text(label, R::new(r.x + 8.0, r.y, r.w - 56.0, r.h), 12.5, 500, fg, Al::L);
-    let track = R::new(r.right() - 40.0, r.cy() - 8.0, 30.0, 16.0);
+    let h = s.trim_start_matches('#');
+    match h.len() {
+        3 if h.chars().all(|c| c.is_ascii_hexdigit()) => theme::color(&h.chars().flat_map(|c| [c, c]).collect::<String>()),
+        6 | 8 if h.chars().all(|c| c.is_ascii_hexdigit()) => theme::color(&h[..6]),
+        _ => None,
+    }
+}
+
+/// A gradient's color at `f` (0 bottom .. 1 top).
+fn at_stop(stops: &[(f32, C)], f: f32) -> C {
+    let Some(first) = stops.first() else { return BLACK };
+    if f <= first.0 {
+        return first.1;
+    }
+    for w in stops.windows(2) {
+        let ((p0, c0), (p1, c1)) = (w[0], w[1]);
+        if f <= p1 {
+            return c0.mix(c1, if p1 > p0 { (f - p0) / (p1 - p0) } else { 1.0 });
+        }
+    }
+    stops.last().map(|s| s.1).unwrap_or(BLACK)
+}
+
+/// A Settings card's background (lighter while the mouse is on a card that can be clicked).
+fn card_base(g: &Gfx, r: R, hover: bool) {
+    g.rrect(r, 10.0, if hover { surf(g, true) } else { surf(g, false) });
+}
+
+/// A Settings card's icon, name and short explanation, kept within `w` from the card's left.
+fn card_text(g: &Gfx, r: R, glyph: char, title: &str, sub: &str, w: f32) {
+    g.icon(glyph, R::new(r.x + 10.0, r.y, 20.0, r.h), 14.0, btn_icon(g, WHITE.a(0.85)));
+    let tw = (w - 42.0).max(20.0);
+    g.text(title, R::new(r.x + 40.0, r.y + 6.0, tw, 18.0), 12.5, 600, WHITE, Al::L);
+    g.text(sub, R::new(r.x + 40.0, r.y + 23.0, tw, 16.0), 10.5, 500, T3, Al::L);
+}
+
+/// A Settings card with a switch: click anywhere on it. `on: None` greys it out (nothing to
+/// switch). Shows "On" / "Off" beside the switch, as Windows does.
+#[allow(clippy::too_many_arguments)]
+fn setting_card(g: &Gfx, ui: &mut Ui, r: R, glyph: char, title: &str, sub: &str, on: Option<bool>, opt: Opt, col: C) {
+    let hv = on.is_some() && ui.hit(r, Act::Opt(opt));
+    card_base(g, r, hv);
+    card_text(g, r, glyph, title, sub, r.w - 96.0);
     let state = on.unwrap_or(false);
-    g.rrect(track, 8.0, if state { accent_btn(g, col) } else { WHITE.a(if on.is_some() { 0.22 } else { 0.1 }) });
-    let kx = if state { track.right() - 8.0 } else { track.x + 8.0 };
-    g.circle(kx, track.cy(), 6.0, if state { accent_fg(g) } else { WHITE.a(if on.is_some() { 0.9 } else { 0.35 }) });
+    let track = R::new(r.right() - 50.0, r.cy() - 9.0, 38.0, 18.0);
+    let word = if state { "On" } else { "Off" };
+    g.text(word, R::new(track.x - 34.0, r.y, 28.0, r.h), 11.5, 500, if on.is_some() { T2 } else { T3 }, Al::R);
+    if state {
+        g.rrect(track, 9.0, accent_btn(g, col));
+        g.circle(track.right() - 9.0, track.cy(), 5.5, accent_fg(g));
+    } else {
+        g.rrect_stroke(track.inset(0.75, 0.75), 8.25, WHITE.a(if on.is_some() { 0.6 } else { 0.25 }), 1.5, false);
+        g.circle(track.x + 9.0, track.cy(), 4.5, WHITE.a(if on.is_some() { 0.8 } else { 0.3 }));
+    }
 }
 
 fn draw_battery(g: &Gfx, x: f32, cy: f32, w: f32, h: f32, f: f32, charging: bool) {
     let body = R::new(x, cy - h / 2.0, w, h);
-    g.rrect_stroke(body, 3.0, WHITE.a(0.55), 1.2, false);
-    g.rrect(R::new(body.right() + 1.0, cy - h * 0.2, 2.0, h * 0.4), 1.0, WHITE.a(0.55));
+    g.rrect_stroke(body, 3.0, g.ico(WHITE.a(0.55)), 1.2, false);
+    g.rrect(R::new(body.right() + 1.0, cy - h * 0.2, 2.0, h * 0.4), 1.0, g.ico(WHITE.a(0.55)));
     let col = if charging {
         GREEN
     } else if f <= 0.2 {
@@ -5150,7 +6128,7 @@ fn draw_battery(g: &Gfx, x: f32, cy: f32, w: f32, h: f32, f: f32, charging: bool
         WHITE
     };
     let inner = body.inset(2.2, 2.2);
-    g.rrect(R::new(inner.x, inner.y, (inner.w * f.clamp(0.04, 1.0)).max(1.5), inner.h), 1.5, col);
+    g.rrect(R::new(inner.x, inner.y, (inner.w * f.clamp(0.04, 1.0)).max(1.5), inner.h), 1.5, g.ico(col));
 }
 
 /// Background of a regular button (theme.conf `button` / `button_hover`).
@@ -5158,7 +6136,7 @@ fn surf(g: &Gfx, hover: bool) -> C {
     let t = &g.theme;
     match (hover, t.button, t.button_hover) {
         (true, _, Some(h)) => h,
-        (true, Some(b), None) => b.mix(t.fg, 0.18),
+        (true, Some(b), None) => b.mix(g.neutral(), 0.18),
         (true, None, None) => SURF_H,
         (false, Some(b), _) => b,
         (false, None, _) => SURF,
@@ -5170,7 +6148,7 @@ fn surf_active(g: &Gfx) -> C {
     let t = &g.theme;
     match (t.button_active, t.button) {
         (Some(a), _) => a,
-        (None, Some(b)) => b.mix(t.fg, 0.18),
+        (None, Some(b)) => b.mix(g.neutral(), 0.18),
         (None, None) => SURF_H,
     }
 }
@@ -5269,7 +6247,7 @@ fn value_box(g: &Gfx, r: R, val: &str, edit: Option<(&str, bool)>, hover: bool, 
             let tx = r.cx() - tw / 2.0;
             g.text(buf, R::new(tx, r.y, tw + 4.0, r.h), size, 600, WHITE, Al::L);
             if caret {
-                g.line(tx + tw + 1.5, r.cy() - 6.0, tx + tw + 1.5, r.cy() + 6.0, 1.3, WHITE);
+                g.line(tx + tw + 1.5, r.cy() - 6.0, tx + tw + 1.5, r.cy() + 6.0, 1.3, g.txt(WHITE));
             }
         }
         None => {
@@ -5362,18 +6340,56 @@ fn parse_due_on(s: &str, now: i64, day: i64) -> Option<Option<i64>> {
     Some(Some(t))
 }
 
-fn ext_color(ext: &str) -> C {
+/// Which kind of file an extension is (0 PDF, 1 document, 2 spreadsheet, 3 slides, 4 image,
+/// 5 archive, 6 audio, 7 video, 8 program, 9 anything else).
+fn ext_kind(ext: &str) -> usize {
     match ext {
-        "PDF" => C::hex(0xE5484D),
-        "DOC" | "DOCX" | "RTF" | "TXT" | "MD" => C::hex(0x3E7BFA),
-        "XLS" | "XLSX" | "CSV" => C::hex(0x30A46C),
-        "PPT" | "PPTX" | "KEY" => C::hex(0xF76B15),
-        "PNG" | "JPG" | "JPEG" | "GIF" | "WEBP" | "BMP" | "SVG" | "HEIC" => C::hex(0x8E4EC6),
-        "ZIP" | "RAR" | "7Z" | "TAR" | "GZ" => C::hex(0xC9A227),
-        "MP3" | "WAV" | "FLAC" | "M4A" | "OGG" => C::hex(0xD6409F),
-        "MP4" | "MOV" | "MKV" | "AVI" | "WEBM" => C::hex(0x12A594),
-        "EXE" | "MSI" => C::hex(0x6E6E73),
-        _ => C::hex(0x5B5B66),
+        "PDF" => 0,
+        "DOC" | "DOCX" | "RTF" | "TXT" | "MD" => 1,
+        "XLS" | "XLSX" | "CSV" => 2,
+        "PPT" | "PPTX" | "KEY" => 3,
+        "PNG" | "JPG" | "JPEG" | "GIF" | "WEBP" | "BMP" | "SVG" | "HEIC" => 4,
+        "ZIP" | "RAR" | "7Z" | "TAR" | "GZ" => 5,
+        "MP3" | "WAV" | "FLAC" | "M4A" | "OGG" => 6,
+        "MP4" | "MOV" | "MKV" | "AVI" | "WEBM" => 7,
+        "EXE" | "MSI" => 8,
+        _ => 9,
+    }
+}
+
+/// The color of a file type's badge. With a Shelf color picked (a ready-made look, or Icons ▸
+/// Shelf on the Colors page) every type gets its own shade of that color, so the badges match
+/// the theme and the types can still be told apart; otherwise the usual colors per type.
+fn ext_color(g: &Gfx, ext: &str) -> C {
+    let kind = ext_kind(ext);
+    if let Some(base) = g.theme.feature[3] {
+        // (strength, brightness) of each kind's shade, relative to the Shelf color
+        const SHADES: [(f32, f32); 10] = [
+            (1.0, 1.0),
+            (0.7, 0.86),
+            (1.0, 0.7),
+            (0.5, 1.0),
+            (0.85, 0.82),
+            (0.45, 0.74),
+            (1.0, 0.88),
+            (0.65, 0.64),
+            (0.3, 0.6),
+            (0.22, 0.54),
+        ];
+        let (h, s, v) = theme::to_hsv(base);
+        let (sm, vm) = SHADES[kind];
+        return theme::hsv(h, (s * sm).clamp(0.0, 1.0), (v * vm).clamp(0.18, 0.999));
+    }
+    const ORIGINAL: [u32; 10] = [0xE5484D, 0x3E7BFA, 0x30A46C, 0xF76B15, 0x8E4EC6, 0xC9A227, 0xD6409F, 0x12A594, 0x6E6E73, 0x5B5B66];
+    C::hex(ORIGINAL[kind])
+}
+
+/// Text on a colored badge: white, or near-black on a light badge.
+fn on_color(c: C) -> C {
+    if theme::luma(std::iter::once(c)) > 0.6 {
+        C(0.1, 0.1, 0.11, 1.0)
+    } else {
+        PURE_WHITE
     }
 }
 
@@ -5426,8 +6442,21 @@ pub fn dbg_log(s: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{hotkey_allowed, hotkey_name, left_label, parse_amount, parse_due, parse_due_on, passed_alerts, reminder_due};
+    use super::{hotkey_allowed, parse_color_text, hotkey_name, left_label, parse_amount, parse_due, parse_due_on, passed_alerts, reminder_due};
     use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
+
+    #[test]
+    fn pasted_colors() {
+        let hex = |s: &str| parse_color_text(s).map(crate::theme::hex);
+        assert_eq!(hex(" #1e4fd8 ").as_deref(), Some("#1E4FD8"));
+        assert_eq!(hex("1E4FD8").as_deref(), Some("#1E4FD8"));
+        assert_eq!(hex("#abc").as_deref(), Some("#AABBCC"));
+        assert_eq!(hex("#1E4FD8CC").as_deref(), Some("#1E4FD8"));
+        assert_eq!(hex("rgb(30, 79, 216)").as_deref(), Some("#1E4FD8"));
+        assert_eq!(hex("30, 79, 216").as_deref(), Some("#1E4FD8"));
+        assert_eq!(hex("hello"), None);
+        assert_eq!(hex("rgb(300, 0, 0)"), None);
+    }
 
     // 2026-11-03 20:00:00 in the naive-local epoch used by the app
     const NOW: i64 = 20760 * 86400 + 20 * 3600;

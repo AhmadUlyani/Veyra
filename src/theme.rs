@@ -45,17 +45,23 @@ pub struct Theme {
     /// The focus timer while focusing / during a break (None = orange / green).
     pub timer: Option<C>,
     pub timer_break: Option<C>,
+    /// Each feature's own color, in tab order (Music, Focus, Water, Shelf, Tasks, Clipboard,
+    /// Settings): its tab icon, buttons and notices. None = the built-in color. Focus is `timer`.
+    pub feature: [Option<C>; 7],
 }
+
+/// theme.conf keys of the feature colors, in tab order.
+pub const FEATURE_KEYS: [&str; 7] = ["color_music", "timer", "color_water", "color_shelf", "color_tasks", "color_clipboard", "color_settings"];
 
 impl Default for Theme {
     fn default() -> Self {
         Theme {
             bg: vec![(0.0, C(0.0, 0.0, 0.0, 1.0))],
             fg: C(1.0, 1.0, 1.0, 1.0),
-            text_contrast: 0.0,
+            text_contrast: 0.35,
             bg_open: vec![(0.0, C(0.0, 0.0, 0.0, 1.0))],
             fg_open: C(1.0, 1.0, 1.0, 1.0),
-            text_contrast_open: 0.0,
+            text_contrast_open: 0.35,
             button: None,
             button_hover: None,
             button_text: None,
@@ -69,6 +75,7 @@ impl Default for Theme {
             lyrics_hover: None,
             timer: None,
             timer_break: None,
+            feature: [None; 7],
         }
     }
 }
@@ -145,7 +152,7 @@ button_accent_text = auto
 # --- Icons ------------------------------------------------------
 # Icon colors, set apart from the text.
 # icon        = regular icons (tabs, play / next, + and -, undo, ...)
-#               auto = same color as the text
+#               auto = white on dark backgrounds, dark on light ones (not the text color)
 # icon_active = icon of the open tab and of switched-on toggles (lyrics)
 #               auto = each feature's own color
 icon = auto
@@ -167,6 +174,16 @@ lyrics_hover = auto
 # timer_break = the same during a break
 timer = auto
 timer_break = auto
+
+# --- Feature colors ---------------------------------------------
+# Each feature's own color: its tab icon, main buttons and notices.
+# auto = the built-in color (Focus uses \"timer\" above)
+color_music = auto
+color_water = auto
+color_shelf = auto
+color_tasks = auto
+color_clipboard = auto
+color_settings = auto
 ";
 
 /// Options added after the first release: (where the block starts in `DEFAULT_FILE`, what
@@ -178,7 +195,8 @@ const ADDED: &[(&str, &str)] = &[
     ("# Text and icons on those main", "\n# --- Icons"),
     ("# --- Icons", "\n# --- Music"),
     ("# --- Music", "\n# --- Focus timer"),
-    ("# --- Focus timer", ""),
+    ("# --- Focus timer", "\n# --- Feature colors"),
+    ("# --- Feature colors", ""),
 ];
 
 /// The `ADDED` blocks with every option `cur` already sets left out (so an appended default
@@ -228,6 +246,85 @@ pub fn ensure_file() -> Option<PathBuf> {
     Some(p)
 }
 
+/// The theme file's text (the default file when there is none or it cannot be read).
+pub fn read_text() -> String {
+    path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_else(|| DEFAULT_FILE.to_string())
+}
+
+pub fn save_text(s: &str) -> bool {
+    let (Some(d), Some(p)) = (dir(), path()) else { return false };
+    let _ = std::fs::create_dir_all(d);
+    std::fs::write(p, s).is_ok()
+}
+
+/// The value `key` has in a theme.conf text (the last line setting it), lower-cased.
+pub fn value(text: &str, key: &str) -> Option<String> {
+    pairs(text).into_iter().rev().find(|(k, _)| k == key).map(|(_, v)| v.trim().to_ascii_lowercase())
+}
+
+/// Every option with its default value (what "Reset" puts back).
+pub fn defaults() -> Vec<(String, String)> {
+    pairs(DEFAULT_FILE)
+}
+
+/// Sets options in a theme.conf text: the last line setting each key gets the new value
+/// (comments and every other line stay as they are); a key not in the text yet is appended.
+pub fn set_keys(text: &str, kv: &[(&str, String)]) -> String {
+    let mut lines: Vec<String> = text.trim_start_matches('\u{feff}').lines().map(str::to_string).collect();
+    let key_of = |l: &str| pairs(l).into_iter().next().map(|(k, _)| k);
+    for (k, v) in kv {
+        let k = k.to_ascii_lowercase();
+        match lines.iter().rposition(|l| key_of(l).as_deref() == Some(k.as_str())) {
+            Some(i) => lines[i] = format!("{k} = {v}"),
+            None => lines.push(format!("{k} = {v}")),
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// `#RRGGBB` for a color (transparency left out).
+pub fn hex(c: C) -> String {
+    let b = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02X}{:02X}{:02X}", b(c.0), b(c.1), b(c.2))
+}
+
+/// Hue (0..1), saturation and brightness (0..1) → color.
+pub fn hsv(h: f32, s: f32, v: f32) -> C {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let i = h.floor();
+    let f = h - i;
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    let (r, g, b) = match i as i32 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    C(r, g, b, 1.0)
+}
+
+/// Color → (hue, saturation, brightness), each 0..1.
+pub fn to_hsv(c: C) -> (f32, f32, f32) {
+    let max = c.0.max(c.1).max(c.2);
+    let min = c.0.min(c.1).min(c.2);
+    let d = max - min;
+    let h = if d <= 1e-6 {
+        0.0
+    } else if max == c.0 {
+        ((c.1 - c.2) / d).rem_euclid(6.0) / 6.0
+    } else if max == c.1 {
+        ((c.2 - c.0) / d + 2.0) / 6.0
+    } else {
+        ((c.0 - c.1) / d + 4.0) / 6.0
+    };
+    let s = if max <= 1e-6 { 0.0 } else { d / max };
+    (h, s, max)
+}
+
 pub fn modified() -> Option<SystemTime> {
     std::fs::metadata(path()?).ok()?.modified().ok()
 }
@@ -269,7 +366,7 @@ pub fn parse(s: &str) -> Theme {
 
     let bg = background(is("mode", "gradient"), get("gradient"), get("solid"));
     let fg = opt_color(get("text")).unwrap_or_else(|| auto_fg(&bg));
-    let text_contrast = contrast(get("text_contrast"), &bg);
+    let text_contrast = contrast(get("text_contrast"), &bg, fg);
 
     // open (expanded) colors: "same" (or nothing) keeps the ones above
     let open_differs = is("expanded_mode", "solid") || is("expanded_mode", "gradient");
@@ -284,8 +381,8 @@ pub fn parse(s: &str) -> Theme {
     };
     let text_contrast_open = match get("expanded_text_contrast") {
         Some(v) if v.trim().eq_ignore_ascii_case("same") => text_contrast,
-        Some(v) if !(v.trim().is_empty() || v.trim().eq_ignore_ascii_case("auto")) => contrast(Some(v), &bg_open),
-        _ if open_differs => contrast(None, &bg_open),
+        Some(v) if !(v.trim().is_empty() || v.trim().eq_ignore_ascii_case("auto")) => contrast(Some(v), &bg_open, fg_open),
+        _ if open_differs || fg_open != fg => contrast(None, &bg_open, fg_open),
         _ => text_contrast,
     };
     Theme {
@@ -308,6 +405,7 @@ pub fn parse(s: &str) -> Theme {
         lyrics_hover: opt_color(get("lyrics_hover")),
         timer: opt_color(get("timer")),
         timer_break: opt_color(get("timer_break")),
+        feature: FEATURE_KEYS.map(|k| opt_color(get(k))),
     }
 }
 
@@ -324,17 +422,25 @@ fn background(gradient: bool, grad: Option<&String>, solid: Option<&String>) -> 
 }
 
 /// `text_contrast` value; "auto" (or anything unknown) firms text up on light backgrounds.
-fn contrast(v: Option<&String>, bg: &[(f32, C)]) -> f32 {
+/// How much faded text (hints, labels, the battery level) is firmed up. `auto`: more on light
+/// backgrounds, and more for a picked text color that stands out less from the background than
+/// the automatic white / dark would (faded red on black turns almost black otherwise).
+fn contrast(v: Option<&String>, bg: &[(f32, C)], fg: C) -> f32 {
     match v.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
         Some("normal") | Some("low") => 0.0,
         Some("high") => 0.6,
         Some("max") => 1.0,
         Some(n) if n.trim_end_matches('%').parse::<f32>().is_ok() => (n.trim_end_matches('%').parse::<f32>().unwrap() / 100.0).clamp(0.0, 1.0),
         _ => {
-            if luma(bg.iter().map(|s| s.1)) > 0.6 {
-                0.45
+            let lb = luma(bg.iter().map(|s| s.1));
+            // faded white at 38% on near-black reads as dim grey: firm it up a little everywhere
+            let base = if lb > 0.6 { 0.45 } else { 0.35 };
+            let want = (luma(std::iter::once(auto_fg(bg))) - lb).abs();
+            let have = (luma(std::iter::once(fg)) - lb).abs();
+            if want > 0.0 && have < want * 0.95 {
+                f32::max(base, (1.0 - have / want) * 0.9)
             } else {
-                0.0
+                base
             }
         }
     }
@@ -402,7 +508,14 @@ fn from_json(s: &str) -> Option<String> {
 }
 
 /// White on dark backgrounds, near-black on light ones (by average luminance).
-fn auto_fg(bg: &[(f32, C)]) -> C {
+impl Theme {
+    /// Whether the closed island's background is light (dark automatic text).
+    pub fn bg_luma_light(&self) -> bool {
+        luma(self.bg.iter().map(|s| s.1)) > 0.6
+    }
+}
+
+pub fn auto_fg(bg: &[(f32, C)]) -> C {
     if luma(bg.iter().map(|s| s.1)) > 0.6 {
         C(0.11, 0.11, 0.12, 1.0)
     } else {
@@ -475,9 +588,14 @@ mod tests {
         assert_eq!(parse("text_contrast = high").text_contrast, 0.6);
         assert_eq!(parse("text_contrast = 50").text_contrast, 0.5);
         assert_eq!(parse("text_contrast = max").text_contrast, 1.0);
-        // auto: normal on black, stronger on a light background
-        assert_eq!(parse("").text_contrast, 0.0);
-        assert!(parse("solid = #F2DCE0").text_contrast > 0.0);
+        // auto: a little firmer on dark backgrounds, more on a light background
+        assert_eq!(parse("").text_contrast, 0.35);
+        assert!(parse("solid = #F2DCE0").text_contrast > 0.35);
+        // a picked text color that stands out less (red on black) gets firmer faded text
+        assert!(parse("text = #FF2A2A").text_contrast > 0.5);
+        assert_eq!(parse("text = #FFFFFF").text_contrast, 0.35);
+        assert_eq!(parse("text = #FF2A2A
+text_contrast = normal").text_contrast, 0.0);
     }
 
     #[test]
@@ -501,7 +619,7 @@ mod tests {
         // light open background: dark text inside, white outside
         let t = parse("expanded_mode = solid\nexpanded_solid = #F2DCE0");
         assert!(t.fg_open.0 < 0.5 && t.fg.0 > 0.5);
-        assert!(t.text_contrast_open > 0.0 && t.text_contrast == 0.0);
+        assert!(t.text_contrast_open > t.text_contrast);
         let t = parse("text = #00ff00\nexpanded_mode = solid\nexpanded_solid = #F2DCE0\nexpanded_text = same\nexpanded_text_contrast = max");
         assert_eq!(t.fg_open, C(0.0, 1.0, 0.0, 1.0));
         assert_eq!(t.text_contrast_open, 1.0);
@@ -556,11 +674,42 @@ mod tests {
     }
 
     #[test]
+    fn feature_colors() {
+        let t = parse("color_water = #00FF00\ntimer = #FF0000");
+        assert_eq!(t.feature[2], color("#00FF00"));
+        assert_eq!(t.feature[1], color("#FF0000"));
+        assert_eq!(t.feature[3], None);
+        let keys: Vec<String> = pairs(&missing_blocks("timer = auto\ntimer_break = auto")).into_iter().map(|(k, _)| k).collect();
+        assert!(keys.contains(&"color_water".to_string()) && !keys.contains(&"timer".to_string()));
+    }
+
+    #[test]
     fn icons() {
         let t = parse("icon = #FFCC00\nicon_active = auto\nbutton_active = #223344");
         assert_eq!(t.icon, color("#FFCC00"));
         assert_eq!(t.icon_active, None);
         assert_eq!(t.button_active, color("#223344"));
+    }
+
+    #[test]
+    fn set_keys_keeps_comments() {
+        let t = set_keys(DEFAULT_FILE, &[("solid", "#112233".into()), ("button_accent", "#FF8800".into()), ("brand_new", "x".into())]);
+        assert!(t.contains("# Veyra UI colors") && t.contains("solid = #112233") && t.ends_with("brand_new = x\n"));
+        let th = parse(&t);
+        assert_eq!(th.bg[0].1, color("#112233").unwrap());
+        assert_eq!(th.button_accent, color("#FF8800"));
+        // the last line setting a key is the one that counts, so that one changes
+        let t = set_keys("solid = #000\n# c\nsolid = #111", &[("solid", "#222222".into())]);
+        assert_eq!(t, "solid = #000\n# c\nsolid = #222222\n");
+    }
+
+    #[test]
+    fn hsv_round_trip() {
+        for hx in ["#FF0000", "#00FF80", "#1E4FD8", "#F2DCE0", "#000000", "#808080"] {
+            let c = color(hx).unwrap();
+            let (h, s, v) = to_hsv(c);
+            assert_eq!(hex(hsv(h, s, v)), hx);
+        }
     }
 
     #[test]

@@ -75,8 +75,11 @@ pub struct Gfx {
     open: Cell<f32>,
     /// text is placed exactly where asked instead of on the nearest pixel row (see set_no_snap)
     no_snap: Cell<bool>,
-    /// replaces pure white (text, icons, translucent surfaces) so light themes stay readable
+    /// replaces pure white (text, icons) so light themes stay readable
     fg: Cell<C>,
+    /// replaces faint pure white (button backgrounds, hover chips, tracks, thin outlines): the
+    /// automatic text color, so a text color picked by the user never tints them
+    neutral: Cell<C>,
     /// current `text_contrast` (blended between closed and open)
     contrast: Cell<f32>,
     /// brightness of the current background (blended between closed and open)
@@ -173,6 +176,7 @@ impl Gfx {
                 contrast: Cell::new(0.0),
                 bg_luma: Cell::new(0.0),
                 fg: Cell::new(WHITE),
+                neutral: Cell::new(WHITE),
                 theme: crate::theme::Theme::default(),
                 layers,
                 depth: Cell::new(0),
@@ -355,6 +359,29 @@ impl Gfx {
         unsafe { self.rt.SetTransform(&Matrix3x2::translation(dx, dy)) }
     }
 
+    /// Brush for shapes (backgrounds, switches, tracks, outlines, separators): pure white takes
+    /// the neutral color, so a text color picked by the user only ever colors words. Shapes that
+    /// stand for an icon or for text ask for that color themselves (`ico`, `txt`).
+    fn bs(&self, c: C) -> &ID2D1SolidColorBrush {
+        if c.0 == 1.0 && c.1 == 1.0 && c.2 == 1.0 {
+            let n = self.neutral.get();
+            unsafe { self.brush.SetColor(&C(n.0, n.1, n.2, c.3).d2d()) };
+            return &self.brush;
+        }
+        self.b(c)
+    }
+
+    /// Brush for geometry: faint pure white (a bottle's glass) is neutral, stronger white (an
+    /// icon drawn as a shape, already passed through `icon_color`) follows the text like icons do.
+    fn bg_or_text(&self, c: C) -> &ID2D1SolidColorBrush {
+        if c.0 == 1.0 && c.1 == 1.0 && c.2 == 1.0 && c.3 <= 0.3 {
+            let n = self.neutral.get();
+            unsafe { self.brush.SetColor(&C(n.0, n.1, n.2, c.3).d2d()) };
+            return &self.brush;
+        }
+        self.b(c)
+    }
+
     fn b(&self, c: C) -> &ID2D1SolidColorBrush {
         let c = if c.0 == 1.0 && c.1 == 1.0 && c.2 == 1.0 {
             let f = self.fg.get();
@@ -396,6 +423,8 @@ impl Gfx {
         let (a, b) = (th.fg, th.fg_open);
         let mix = |x: f32, y: f32| x + (y - x) * k;
         self.fg.set(C(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2), mix(a.3, b.3)));
+        let (a, b) = (crate::theme::auto_fg(&th.bg), crate::theme::auto_fg(&th.bg_open));
+        self.neutral.set(C(mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2), 1.0));
         self.contrast.set(mix(th.text_contrast, th.text_contrast_open));
         let luma = |bg: &[(f32, C)]| crate::theme::luma(bg.iter().map(|s| s.1));
         self.bg_luma.set(mix(luma(&th.bg), luma(&th.bg_open)));
@@ -412,7 +441,7 @@ impl Gfx {
         }
         let th = &self.theme;
         let same = |u: &C| (u.0 - c.0).abs() < 0.002 && (u.1 - c.1).abs() < 0.002 && (u.2 - c.2).abs() < 0.002;
-        if [th.icon, th.icon_active, th.button_text, th.button_accent_text, th.audio_bar, th.spectrum, th.lyrics_hover, th.timer, th.timer_break].iter().flatten().any(same) {
+        if [th.icon, th.icon_active, th.button_text, th.button_accent_text, th.audio_bar, th.spectrum, th.lyrics_hover, th.timer, th.timer_break].iter().chain(th.feature.iter()).flatten().any(same) {
             return c;
         }
         let l = crate::theme::luma(std::iter::once(c));
@@ -461,30 +490,65 @@ impl Gfx {
     }
 
     pub fn rrect(&self, r: R, rad: f32, c: C) {
-        unsafe { self.rt.FillRoundedRectangle(&rr(r, rad), self.b(c)) }
+        unsafe { self.rt.FillRoundedRectangle(&rr(r, rad), self.bs(c)) }
+    }
+
+    /// Fills a rounded rectangle with a smooth fade from `top` to `bottom` (colors as given).
+    pub fn rrect_vgrad(&self, r: R, rad: f32, top: C, bottom: C) {
+        let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: top.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: bottom.d2d() }];
+        unsafe {
+            let Ok(coll) = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: pt(0.0, r.y), endPoint: pt(0.0, r.y + r.h) };
+            if let Ok(b) = self.rt.CreateLinearGradientBrush(&props, None, &coll) {
+                self.rt.FillRoundedRectangle(&rr(r, rad), &b);
+            }
+        }
     }
 
     pub fn rect(&self, r: R, c: C) {
-        unsafe { self.rt.FillRectangle(&r.d2d(), self.b(c)) }
+        unsafe { self.rt.FillRectangle(&r.d2d(), self.bs(c)) }
     }
 
     pub fn rrect_stroke(&self, r: R, rad: f32, c: C, w: f32, dashed: bool) {
         let st = if dashed { &self.dash } else { &self.round };
-        unsafe { self.rt.DrawRoundedRectangle(&rr(r, rad), self.b(c), w, st) }
+        unsafe { self.rt.DrawRoundedRectangle(&rr(r, rad), self.bs(c), w, st) }
     }
 
     pub fn circle(&self, cx: f32, cy: f32, rad: f32, c: C) {
         let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: rad, radiusY: rad };
-        unsafe { self.rt.FillEllipse(&e, self.b(c)) }
+        unsafe { self.rt.FillEllipse(&e, self.bs(c)) }
     }
 
     pub fn circle_stroke(&self, cx: f32, cy: f32, rad: f32, c: C, w: f32) {
         let e = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: rad, radiusY: rad };
-        unsafe { self.rt.DrawEllipse(&e, self.b(c), w, &self.round) }
+        unsafe { self.rt.DrawEllipse(&e, self.bs(c), w, &self.round) }
+    }
+
+    /// The automatic text color (white on dark backgrounds, near-black on light ones), whatever
+    /// text color the user picked: for surfaces that should stay neutral.
+    pub fn neutral(&self) -> C {
+        let n = self.neutral.get();
+        C(n.0.min(0.999), n.1, n.2, n.3)
     }
 
     pub fn line(&self, x0: f32, y0: f32, x1: f32, y1: f32, w: f32, c: C) {
-        unsafe { self.rt.DrawLine(pt(x0, y0), pt(x1, y1), self.b(c), w, &self.round) }
+        unsafe { self.rt.DrawLine(pt(x0, y0), pt(x1, y1), self.bs(c), w, &self.round) }
+    }
+
+    /// Color for a shape that stands for an icon (drawn with rectangles and lines instead of the
+    /// icon font): the same color as font icons.
+    pub fn ico(&self, c: C) -> C {
+        self.icon_color(c)
+    }
+
+    /// Color for a shape that belongs to text (a typing caret, a line through done tasks):
+    /// white becomes the text color.
+    pub fn txt(&self, c: C) -> C {
+        if !(c.0 == 1.0 && c.1 == 1.0 && c.2 == 1.0) {
+            return c;
+        }
+        let f = self.fg.get();
+        C(f.0.min(0.999), f.1, f.2, f.3 * c.3)
     }
 
     /// Progress arc starting at 12 o'clock, clockwise.
@@ -588,11 +652,11 @@ impl Gfx {
     }
 
     pub fn fill_geo(&self, g: &ID2D1Geometry, c: C) {
-        unsafe { self.rt.FillGeometry(g, self.b(c), None) }
+        unsafe { self.rt.FillGeometry(g, self.bg_or_text(c), None) }
     }
 
     pub fn stroke_geo(&self, g: &ID2D1Geometry, c: C, w: f32) {
-        unsafe { self.rt.DrawGeometry(g, self.b(c), w, &self.round) }
+        unsafe { self.rt.DrawGeometry(g, self.bg_or_text(c), w, &self.round) }
     }
 
     fn fmt(&self, size: f32, weight: u32, al: Al, face: Face, wrap: bool) -> Option<IDWriteTextFormat> {
@@ -703,13 +767,15 @@ impl Gfx {
         }
     }
 
-    /// Regular (text-colored, i.e. white) icons take theme.conf `icon` when set, keeping `c`'s
-    /// transparency; colored icons stay as they are.
+    /// Regular (white) icons take theme.conf `icon` when set, else the automatic color (white on
+    /// dark backgrounds, dark on light ones), keeping `c`'s transparency: a text color picked by
+    /// the user never recolors icons. Colored icons stay as they are.
     pub fn icon_color(&self, c: C) -> C {
-        match self.theme.icon {
-            Some(i) if c.0 == 1.0 && c.1 == 1.0 && c.2 == 1.0 => C(i.0, i.1, i.2, i.3 * c.3),
-            _ => c,
+        if !(c.0 == 1.0 && c.1 == 1.0 && c.2 == 1.0) {
+            return c;
         }
+        let i = self.theme.icon.unwrap_or_else(|| self.neutral.get());
+        C(i.0.min(0.999), i.1, i.2, i.3 * c.3)
     }
 
     /// The time of day, in the clock's typeface.
