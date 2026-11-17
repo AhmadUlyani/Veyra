@@ -1,6 +1,6 @@
 [package]
 name = "veyra"
-version = "1.5.2"
+version = "1.5.3"
 edition = "2021"
 description = "Veyra - a lightweight Dynamic Island for Windows"
 license = "MIT"
