@@ -10,6 +10,7 @@ mod lyrics;
 mod media;
 mod player;
 mod privacy;
+mod qr;
 mod shelf;
 mod shots;
 mod sound;

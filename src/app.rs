@@ -19,7 +19,7 @@ use crate::lyrics::{self, Line};
 use crate::media::{MediaCmd, MediaState};
 use crate::store::{self, Data, Task};
 use crate::util::*;
-use crate::{clip, privacy, shelf, shots, sound, system, theme, thumbs, tray, update};
+use crate::{clip, privacy, qr, shelf, shots, sound, system, theme, thumbs, tray, update};
 
 // ------------------------------------------------------------------ style
 
@@ -151,6 +151,45 @@ const SHELF_TH: f32 = 96.0;
 const SHELF_GAP: f32 = 9.0;
 const SHELF_BODY_W: f32 = 500.0 - 36.0;
 
+/// QR notice: room for the link before it is cut short, space between its buttons
+const QR_TEXT_MAX: f32 = 250.0;
+const QR_BTN_GAP: f32 = 6.0;
+
+/// The buttons a QR code gets: (label, 0 open / 1 copy), the main one first.
+fn qr_buttons(code: &str) -> Vec<(&'static str, u8)> {
+    match qr::kind(code) {
+        qr::Kind::Link(_) => vec![("Open", 0), ("Copy", 1)],
+        qr::Kind::Wifi(_, Some(_)) => vec![("Copy password", 1)],
+        qr::Kind::Wifi(_, None) => vec![("Copy name", 1)],
+        qr::Kind::Text(_) => vec![("Copy", 1)],
+    }
+}
+
+fn qr_btn_w(g: &Gfx, label: &str) -> f32 {
+    // wide enough for "Copied" too, so the button keeps its size when it says so
+    g.measure(label, 11.5, 700).max(g.measure("Copied", 11.5, 600)) + 22.0
+}
+
+fn qr_btns_w(g: &Gfx, code: &str) -> f32 {
+    let b = qr_buttons(code);
+    b.iter().map(|(l, _)| qr_btn_w(g, l)).sum::<f32>() + QR_BTN_GAP * (b.len().saturating_sub(1)) as f32
+}
+
+/// (what it is, one line of what it says): the link without https://, the Wi-Fi network
+/// (never its password), the text on one line.
+fn qr_label(code: &str) -> (&'static str, String) {
+    match qr::kind(code) {
+        qr::Kind::Link(u) => {
+            let low = u.to_ascii_lowercase();
+            let cut = if low.starts_with("https://") { 8 } else if low.starts_with("http://") { 7 } else { 0 };
+            ("link", u[cut..].trim_end_matches('/').to_string())
+        }
+        qr::Kind::Wifi(s, Some(_)) => ("Wi-Fi", s),
+        qr::Kind::Wifi(s, None) => ("Wi-Fi", format!("{s} · open network")),
+        qr::Kind::Text(t) => ("text", clip::preview(&t)),
+    }
+}
+
 /// How many shelf tiles fit side by side in a body `w` wide.
 fn shelf_per(w: f32) -> usize {
     (((w + SHELF_GAP) / (SHELF_TW + SHELF_GAP)).floor() as usize).max(1)
@@ -198,6 +237,8 @@ mod ic {
     pub const KEYBOARD: char = '\u{E765}';
     pub const CAMERA: char = '\u{E722}';
     pub const EDIT: char = '\u{E70F}';
+    pub const QR: char = '\u{ED14}';
+    pub const LINK: char = '\u{E71B}';
 }
 
 // ------------------------------------------------------------------ types
@@ -401,6 +442,13 @@ enum Act {
     ShelfClear,
     ShelfAll,
     ShelfCheck(usize),
+    /// the QR badge on a Shelf image: show what its codes say
+    QrBadge(usize),
+    /// on the QR page: code `i`, open (0) or copy (1); back to the Shelf
+    QrDo(usize, u8),
+    QrClose,
+    /// a button on the QR notice: open (0) or copy (1)
+    ToastQr(u8),
     TaskField,
     TaskTime(i64),
     Edit(Field),
@@ -462,6 +510,8 @@ enum Tap {
     Update,
     /// open the releases page (the automatic update failed)
     Releases,
+    /// show the QR codes it announces on the Shelf
+    Qr,
 }
 
 struct Toast {
@@ -694,6 +744,16 @@ pub struct App {
     drag_text: bool,
     /// Shelf image previews by path; None while decoding (or when the file is not readable)
     thumbs: HashMap<String, Option<ID2D1Bitmap>>,
+    /// what the QR codes in Shelf images say, by path (empty: none); None while looking
+    qr: HashMap<String, Option<Vec<String>>>,
+    /// the QR notice showing: (its toast id, image path)
+    qr_toast: Option<(u64, String)>,
+    /// found while a full-screen app hid the island: announced once it is back
+    qr_later: Option<String>,
+    /// the Shelf image whose QR codes are showing in place of the tiles
+    qr_pop: Option<String>,
+    /// a QR code just copied on that page (which one, when)
+    qr_copied: Option<(Instant, usize)>,
     drag_expanded: bool,
     collapse_at: Option<Instant>,
     /// the mouse has been over the panel since it opened (a panel opened from the tray, with
@@ -909,6 +969,11 @@ impl App {
             drag_hover: false,
             drag_text: false,
             thumbs: HashMap::new(),
+            qr: HashMap::new(),
+            qr_toast: None,
+            qr_later: None,
+            qr_pop: None,
+            qr_copied: None,
             drag_expanded: false,
             collapse_at: None,
             panel_entered: false,
@@ -1193,6 +1258,26 @@ impl App {
                     self.data.shelf = imgs;
                 }
                 self.expand(Some(Tab::Shelf));
+            }
+            // QR codes in pictures from VEYRA_DEMO_DIR: the notice (qr), the badges on the
+            // Shelf (qrshelf), the codes of the first one (qrpage)
+            "qr" | "qrshelf" | "qrpage" => {
+                if let Some(dir) = std::env::var_os("VEYRA_DEMO_DIR") {
+                    let mut imgs: Vec<String> = std::fs::read_dir(dir)
+                        .map(|r| r.flatten().map(|e| e.path().to_string_lossy().into_owned()).filter(|p| thumbs::is_image(p)).take(4).collect())
+                        .unwrap_or_default();
+                    imgs.sort();
+                    for p in &imgs {
+                        self.qr.insert(p.clone(), Some(qr::scan_now(p)));
+                    }
+                    self.data.shelf = imgs;
+                }
+                let first = self.data.shelf.iter().find(|p| self.qr.get(*p).and_then(|c| c.as_ref()).map(|c| !c.is_empty()).unwrap_or(false)).cloned();
+                match (v, first) {
+                    ("qr", Some(p)) => self.qr_notice(&p),
+                    ("qrpage", Some(p)) => self.show_qr_page(&p),
+                    _ => self.expand(Some(Tab::Shelf)),
+                }
             }
             // text dragged over the island (empty / filled Clipboard tab)
             "cliphover" | "cliphoverfull" => {
@@ -1517,6 +1602,7 @@ impl App {
         self.cancel_hk_capture();
         self.commit_edit();
         self.shelf_sel.clear();
+        self.qr_pop = None;
         self.expanded = false;
         self.input_focus = false;
         self.drag_expanded = false;
@@ -1570,6 +1656,12 @@ impl App {
                     return (w, SHORT_H, SHORT_H / 2.0, ViewKey::Toast(t.id));
                 }
                 let text = self.gfx.measure(&t.title, TWO_TITLE, 600).max(self.gfx.measure(&t.sub, TWO_SUB, 400));
+                if let Some(code) = self.qr_toast_code(t.id) {
+                    // the QR notice: its buttons on the right, a long link cut short
+                    let btns = qr_btns_w(&self.gfx, &code);
+                    let w = (TWO_PAD + TWO_ICON + TWO_GAP + text.min(QR_TEXT_MAX) + 12.0 + btns + TWO_PAD).clamp(150.0, TWO_MAX_W + btns);
+                    return (w, TWO_H, 20.0, ViewKey::Toast(t.id));
+                }
                 let w = (TWO_PAD + TWO_ICON + TWO_GAP + text + TWO_PAD + 8.0).clamp(150.0, TWO_MAX_W);
                 return (w, TWO_H, 20.0, ViewKey::Toast(t.id));
             }
@@ -3255,7 +3347,27 @@ impl App {
             }
         }
         let tx = ir.right() + TWO_GAP;
-        let tw = c.right() - tx - TWO_PAD;
+        let mut tw = c.right() - tx - TWO_PAD;
+        if let Some(code) = self.qr_toast_code(t.id) {
+            // right to left, so the main one (Open) ends up first; registered after the
+            // notice itself, so they win over tapping it
+            let mut x = c.right() - TWO_PAD;
+            for (k, (label, a)) in qr_buttons(&code).iter().enumerate().rev() {
+                let bw = qr_btn_w(g, label);
+                let r = R::new(x - bw, c.cy() - 13.0, bw, 26.0);
+                let hv = ui.hit(r, Act::ToastQr(*a));
+                if k == 0 {
+                    let ac = accent_btn(g, t.accent);
+                    g.rrect(r, 13.0, if hv { ac.mix(WHITE, 0.2) } else { ac });
+                    g.text(label, r, 11.5, 700, accent_fg(g), Al::C);
+                } else {
+                    g.rrect(r, 13.0, surf(g, hv));
+                    g.text(label, r, 11.5, 600, btn_fg(g, WHITE), Al::C);
+                }
+                x -= bw + QR_BTN_GAP;
+            }
+            tw = x + QR_BTN_GAP - 12.0 - tx;
+        }
         let mid = c.cy();
         g.text(&t.title, R::new(tx, mid - 17.0, tw, 18.0), TWO_TITLE, 600, WHITE, Al::L);
         g.text(&t.sub, R::new(tx, mid + 1.0, tw, 16.0), TWO_SUB, 400, T2, Al::L);
@@ -3653,6 +3765,14 @@ impl App {
     }
 
     fn draw_shelf(&self, g: &Gfx, ui: &mut Ui, c: R) {
+        if let Some(p) = &self.qr_pop {
+            if let Some(Some(codes)) = self.qr.get(p) {
+                if !codes.is_empty() {
+                    self.draw_qr_page(g, ui, c, p, codes);
+                    return;
+                }
+            }
+        }
         let files = &self.data.shelf;
         if files.is_empty() {
             let r = c.inset(2.0, 2.0);
@@ -3718,6 +3838,24 @@ impl App {
                     let bc = ext_color(g, &ext);
                     g.rrect(lr, 4.0, bc.a(0.92));
                     g.text(&e, lr, 8.5, 700, on_color(bc), Al::C);
+                }
+                // a QR code in the picture: the badge shows what it says
+                if let Some(Some(codes)) = self.qr.get(path) {
+                    if !codes.is_empty() {
+                        // small, so the file type still fits beside it: the QR sign, and how
+                        // many codes when there are more
+                        let count = if codes.len() > 1 { codes.len().min(9).to_string() } else { String::new() };
+                        let lw = if count.is_empty() { 18.0 } else { 15.0 + g.measure(&count, 9.0, 700) + 4.0 };
+                        let qr_r = R::new(pr.x + 3.0, pr.bottom() - 19.0, lw, 16.0);
+                        let qh = whole && ui.hit(qr_r, Act::QrBadge(k));
+                        let bc = feat(g, Tab::Shelf);
+                        let bg = if qh { bc.mix(WHITE, 0.25) } else { bc };
+                        g.rrect(qr_r, 5.0, bg);
+                        g.icon(ic::QR, R::new(qr_r.x + 1.0, qr_r.y, 16.0, qr_r.h), 10.0, on_color(bg));
+                        if !count.is_empty() {
+                            g.text(&count, R::new(qr_r.x + 15.0, qr_r.y, lw - 15.0, qr_r.h), 9.0, 700, on_color(bg), Al::L);
+                        }
+                    }
                 }
             } else if is_dir {
                 g.icon(ic::FOLDER, badge, 28.0, feat(g, Tab::Shelf));
@@ -3796,6 +3934,70 @@ impl App {
         }
     }
 
+    /// What the QR codes in a Shelf image say, in place of the tiles (from its QR badge or the
+    /// QR notice): one row each, with Open / Copy.
+    fn draw_qr_page(&self, g: &Gfx, ui: &mut Ui, c: R, path: &str, codes: &[String]) {
+        let acc = feat(g, Tab::Shelf);
+        // header: back to the Shelf, which picture
+        let br = R::new(c.x, c.y - 2.0, 26.0, 24.0);
+        let bh = ui.hit(br, Act::QrClose);
+        g.rrect(br, 8.0, surf(g, bh));
+        g.icon(ic::LEFT, br, 10.0, if bh { WHITE } else { T2 });
+        let name = std::path::Path::new(path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let what = if codes.len() == 1 { "QR code".to_string() } else { format!("{} QR codes", codes.len()) };
+        let hx = br.right() + 10.0;
+        let ww = g.measure(&what, 13.0, 600);
+        g.text(&what, R::new(hx, c.y - 2.0, ww + 2.0, 24.0), 13.0, 600, WHITE, Al::L);
+        g.text(&format!("in {name}"), R::new(hx + ww + 6.0, c.y - 2.0, c.right() - hx - ww - 6.0, 24.0), 11.5, 400, T3, Al::L);
+        // one row per code
+        let ly = c.y + 28.0;
+        let rh = 33.0;
+        let rows = ((c.bottom() - ly + 3.0) / rh).floor().max(1.0) as usize;
+        let copied = self.qr_copied.filter(|(t, _)| t.elapsed() < Duration::from_millis(1400)).map(|(_, i)| i);
+        for (i, code) in codes.iter().enumerate().take(rows) {
+            let r = R::new(c.x, ly + i as f32 * rh, c.w, rh - 3.0);
+            let hv = ui.hover(r);
+            g.rrect(r, 9.0, if hv { WHITE.a(0.08) } else { WHITE.a(0.04) });
+            let kind = qr::kind(code);
+            let icon = match kind {
+                qr::Kind::Link(_) => ic::LINK,
+                qr::Kind::Wifi(..) => ic::WIFI,
+                qr::Kind::Text(_) => ic::DOC,
+            };
+            g.icon(icon, R::new(r.x + 8.0, r.y, 18.0, r.h), 12.0, acc);
+            // buttons from the right
+            let mut x = r.right() - 4.0;
+            for (k, (label, a)) in qr_buttons(code).iter().enumerate().rev() {
+                let done = *a == 1 && copied == Some(i);
+                let label = if done { "Copied" } else { *label };
+                let bw = qr_btn_w(g, label);
+                let b = R::new(x - bw, r.y + 3.0, bw, r.h - 6.0);
+                let bh = ui.hit(b, Act::QrDo(i, *a));
+                if k == 0 && !done {
+                    let ac = accent_btn(g, acc);
+                    g.rrect(b, 12.0, if bh { ac.mix(WHITE, 0.2) } else { ac });
+                    g.text(label, b, 11.5, 700, accent_fg(g), Al::C);
+                } else {
+                    g.rrect(b, 12.0, if done { acc.a(0.25) } else { surf(g, bh) });
+                    g.text(label, b, 11.5, 600, if done { acc.mix(WHITE, 0.35) } else { btn_fg(g, WHITE) }, Al::C);
+                }
+                x -= bw + QR_BTN_GAP;
+            }
+            let (_, line) = qr_label(code);
+            let line = match &kind {
+                qr::Kind::Wifi(..) => format!("Wi-Fi · {line}"),
+                _ => line,
+            };
+            let tr = R::new(r.x + 32.0, r.y, x - 6.0 - (r.x + 32.0), r.h);
+            // keyed by row, with its own high bit (tasks and clipboard rows use others)
+            self.marquee_text(g, (1 << 61) | i as u64, hv, &line, tr, 12.5, 500, WHITE);
+        }
+        if codes.len() > rows {
+            let more = format!("+{} more", codes.len() - rows);
+            g.text(&more, R::new(c.right() - 120.0, c.y - 2.0, 120.0, 24.0), 11.5, 500, T3, Al::R);
+        }
+    }
+
     /// Ask for previews of the image tiles in view (and the next page, so scrolling finds
     /// them ready); forget the ones no longer on the Shelf.
     fn sync_thumbs(&mut self) {
@@ -3813,6 +4015,13 @@ impl App {
                 self.thumbs.insert(p.clone(), None);
                 thumbs::request(p);
             }
+            if thumbs::is_image(p) && !self.qr.contains_key(p) {
+                self.qr.insert(p.clone(), None);
+                qr::request(p, false);
+            }
+        }
+        if self.qr.keys().any(|k| !shelf.contains(k)) {
+            self.qr.retain(|k, _| shelf.contains(k));
         }
     }
 
@@ -4320,6 +4529,9 @@ impl App {
                     self.cancel_hk_capture();
                 }
                 self.shelf_sel.clear();
+                if t != Tab::Shelf {
+                    self.qr_pop = None;
+                }
                 self.tab = t;
                 if t == Tab::Media && self.lyrics_open {
                     self.ensure_lyrics();
@@ -4453,6 +4665,22 @@ impl App {
                 }
             }
             Act::ShelfCheck(i) => self.toggle_sel(i),
+            Act::QrBadge(i) => {
+                if let Some(p) = self.data.shelf.get(i).cloned() {
+                    self.qr_pop = Some(p);
+                    self.qr_copied = None;
+                }
+            }
+            Act::QrClose => self.qr_pop = None,
+            Act::QrDo(i, a) => {
+                let code = self.qr_pop.as_ref().and_then(|p| self.qr.get(p)?.as_ref()?.get(i).cloned());
+                if let Some(code) = code {
+                    if self.qr_run(&code, a) {
+                        self.qr_copied = Some((Instant::now(), i));
+                    }
+                }
+            }
+            Act::ToastQr(a) => self.toast_qr(a),
             Act::ClipCopy(i) => {
                 // copy it again but leave the list as it is: the entry keeps its place
                 if let Some(t) = self.clips.get(i).map(|c| c.text.clone()) {
@@ -4717,6 +4945,9 @@ impl App {
             let new: Vec<String> = self.shots.poll().into_iter().filter(|p| !self.data.shelf.contains(p)).collect();
             if !new.is_empty() {
                 let count = new.len();
+                for p in &new {
+                    self.qr_scan(p, true);
+                }
                 self.data.shelf.extend(new);
                 self.shelf_scroll = self.shelf_max();
                 self.dirty = true;
@@ -4729,6 +4960,12 @@ impl App {
         if let Some(t) = &self.toast {
             if n >= t.until && !self.cursor_inside() {
                 self.toast = None;
+                redraw = true;
+            }
+        }
+        if !self.hidden && !self.expanded && self.toast.is_none() {
+            if let Some(p) = self.qr_later.take() {
+                self.qr_notice(&p);
                 redraw = true;
             }
         }
@@ -5137,6 +5374,7 @@ impl App {
                     self.drag_hover = false;
                     for f in files {
                         if !self.data.shelf.contains(&f) {
+                            self.qr_scan(&f, true);
                             self.data.shelf.push(f);
                         }
                     }
@@ -5162,6 +5400,7 @@ impl App {
                 }
                 Event::UpdateInfo(r, manual) => self.on_update_info(r, manual),
                 Event::UpdateDone(r) => self.on_update_done(r),
+                Event::Qr(p, codes, notify) => self.on_qr(p, codes, notify),
                 Event::Thumb(p, t) => {
                     // only while the file is still on the Shelf (it may be gone by now)
                     if let Some(slot) = self.thumbs.get_mut(&p) {
@@ -5366,6 +5605,7 @@ impl App {
         if !self.expanded {
             match hit {
                 Some(Act::VolBar(r)) => self.act(Act::VolBar(r), p.0),
+                Some(Act::ToastQr(a)) => self.toast_qr(a),
                 Some(Act::Tab(t)) => self.expand(Some(t)),
                 Some(Act::Toast) => {
                     let (tab, tap) = self.toast.as_ref().map(|t| (t.tab, t.tap)).unwrap_or((None, Tap::None));
@@ -5614,6 +5854,12 @@ impl App {
                 update::open_releases_page();
                 true
             }
+            Tap::Qr => {
+                if let Some((_, p)) = self.qr_toast.take() {
+                    self.show_qr_page(&p);
+                }
+                true
+            }
         }
     }
 
@@ -5770,6 +6016,111 @@ impl App {
         let reminder = self.toast.as_ref().map(|t| t.tab.is_some() || t.tap != Tap::None).unwrap_or(false);
         if !self.expanded && !reminder && !self.demo {
             self.toast(TIcon::G(ic::CLIP), "Text copied", "", 1.4, WHITE, None);
+        }
+    }
+
+    // -------------------------------------------------------------- QR codes
+
+    /// Look for QR codes in a Shelf image; `notify`: announce what is found.
+    fn qr_scan(&mut self, path: &str, notify: bool) {
+        if thumbs::is_image(path) {
+            self.qr.insert(path.to_string(), None);
+            qr::request(path, notify);
+        }
+    }
+
+    fn on_qr(&mut self, path: String, codes: Vec<String>, notify: bool) {
+        // only while the image is still on the Shelf (it may be gone by now)
+        if !self.data.shelf.contains(&path) {
+            return;
+        }
+        // the count only: what a code says can be a password and must never reach the log file
+        if !codes.is_empty() {
+            dbg_log(&format!("qr: {} code(s) in a Shelf image", codes.len()));
+        }
+        let found = !codes.is_empty();
+        self.qr.insert(path.clone(), Some(codes));
+        if notify && found {
+            if self.hidden {
+                self.qr_later = Some(path);
+            } else {
+                self.qr_notice(&path);
+            }
+        }
+    }
+
+    /// "QR code · link" with Open / Copy; tapping it shows the codes on the Shelf.
+    fn qr_notice(&mut self, path: &str) {
+        let Some(Some(codes)) = self.qr.get(path) else { return };
+        let Some(first) = codes.first().cloned() else { return };
+        let n = codes.len();
+        let (what, sub) = qr_label(&first);
+        let title = if n > 1 { format!("{n} QR codes · {what}") } else { format!("QR code · {what}") };
+        self.notice(TIcon::G(ic::QR), &title, &sub, 10.0, feat(&self.gfx, Tab::Shelf), Tap::Qr);
+        self.qr_toast = self.toast.as_ref().map(|t| (t.id, path.to_string()));
+    }
+
+    /// The first code of the QR notice with this toast id (None: it is another notice).
+    fn qr_toast_code(&self, id: u64) -> Option<String> {
+        let (tid, p) = self.qr_toast.as_ref()?;
+        if *tid != id {
+            return None;
+        }
+        self.qr.get(p)?.as_ref()?.first().cloned()
+    }
+
+    fn show_qr_page(&mut self, path: &str) {
+        let Some(i) = self.data.shelf.iter().position(|p| p == path) else { return };
+        self.expand(Some(Tab::Shelf));
+        self.shelf_sel.clear();
+        // back on the Shelf, that picture is in view
+        self.shelf_scroll = i.min(self.shelf_max());
+        self.qr_pop = Some(path.to_string());
+        self.qr_copied = None;
+    }
+
+    /// A button on the QR notice: open (0) or copy (1) its first code.
+    fn toast_qr(&mut self, a: u8) {
+        let Some((id, p)) = self.qr_toast.take() else { return };
+        if self.toast.as_ref().map(|t| t.id) != Some(id) {
+            return;
+        }
+        self.toast = None;
+        let Some(code) = self.qr.get(&p).and_then(|c| c.as_ref()?.first().cloned()) else { return };
+        if self.qr_run(&code, a) {
+            let what = match qr::kind(&code) {
+                qr::Kind::Link(_) => "Link copied",
+                qr::Kind::Wifi(_, Some(_)) => "Password copied",
+                qr::Kind::Wifi(_, None) => "Network name copied",
+                qr::Kind::Text(_) => "Text copied",
+            };
+            self.toast(TIcon::G(ic::CHECK), what, "", 1.4, GREEN, None);
+        }
+        self.kick();
+    }
+
+    /// Open (0) a link in the browser, or copy (1) what the code is for: the link, the Wi-Fi
+    /// password (the network name when it has none), the text. Returns true when copied.
+    fn qr_run(&mut self, code: &str, a: u8) -> bool {
+        let kind = qr::kind(code);
+        if a == 0 {
+            if let qr::Kind::Link(u) = &kind {
+                shelf::open(u);
+            }
+            return false;
+        }
+        let text = match kind {
+            qr::Kind::Link(u) => u,
+            qr::Kind::Wifi(_, Some(p)) => p,
+            qr::Kind::Wifi(s, None) => s,
+            qr::Kind::Text(t) => t,
+        };
+        // copied from a QR code, not by the user: it stays out of the Clipboard tab
+        if clip::write(self.hwnd, &text) {
+            self.clip_ignore = Some(text);
+            true
+        } else {
+            false
         }
     }
 

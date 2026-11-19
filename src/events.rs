@@ -32,6 +32,8 @@ pub enum Event {
     Drop(Vec<String>),
     DropText(String),
     Thumb(String, Option<Thumb>),
+    /// what the QR codes in a Shelf image say (empty: none found), and whether to announce them
+    Qr(String, Vec<String>, bool),
     /// latest release: Ok(Some) newer one, Ok(None) up to date, Err could not check; and whether the user asked
     UpdateInfo(Result<Option<crate::update::Release>, ()>, bool),
     /// the new exe is in place (Ok) or why not
