@@ -5374,7 +5374,9 @@ impl App {
                     self.drag_hover = false;
                     for f in files {
                         if !self.data.shelf.contains(&f) {
-                            self.qr_scan(&f, true);
+                            // quietly: only new screenshots get the QR notice; a dropped
+                            // picture shows its QR badge on the Shelf
+                            self.qr_scan(&f, false);
                             self.data.shelf.push(f);
                         }
                     }
@@ -6056,7 +6058,7 @@ impl App {
         let n = codes.len();
         let (what, sub) = qr_label(&first);
         let title = if n > 1 { format!("{n} QR codes · {what}") } else { format!("QR code · {what}") };
-        self.notice(TIcon::G(ic::QR), &title, &sub, 10.0, feat(&self.gfx, Tab::Shelf), Tap::Qr);
+        self.notice(TIcon::G(ic::QR), &title, &sub, 5.0, feat(&self.gfx, Tab::Shelf), Tap::Qr);
         self.qr_toast = self.toast.as_ref().map(|t| (t.id, path.to_string()));
     }
 
