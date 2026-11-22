@@ -203,6 +203,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_TIMER => {
                 match wp.0 {
                     1 => app.frame(),
+                    app::TIMER_ONTOP => app.ontop_timer(),
                     _ => app.tick(),
                 }
                 Some(LRESULT(0))

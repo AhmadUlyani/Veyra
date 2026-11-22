@@ -34,6 +34,10 @@ pub enum Event {
     Thumb(String, Option<Thumb>),
     /// what the QR codes in a Shelf image say (empty: none found), and whether to announce them
     Qr(String, Vec<String>, bool),
+    /// something changed in the Screenshots folder (see shots::watch_changes)
+    ShotsChanged,
+    /// the windows on screen were restacked, or another one became active (see system::watch_foreground)
+    Foreground,
     /// latest release: Ok(Some) newer one, Ok(None) up to date, Err could not check; and whether the user asked
     UpdateInfo(Result<Option<crate::update::Release>, ()>, bool),
     /// the new exe is in place (Ok) or why not

@@ -1,9 +1,10 @@
 //! QR codes in Shelf images: finds and reads them on one background thread and posts what
 //! they say to the UI thread (Event::Qr). Also tells a link, a Wi-Fi login and plain text apart.
 
+use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use windows::core::*;
 use windows::Win32::Graphics::Imaging::*;
@@ -18,9 +19,16 @@ const MAX_SIDE: u32 = 4096;
 /// (path, whether a notice should say what was found)
 static TX: Mutex<Option<Sender<(String, bool)>>> = Mutex::new(None);
 
+/// A screenshot that just appeared may still be being written: try again this often, for
+/// this long, before giving up on it.
+const RETRY: Duration = Duration::from_millis(120);
+const RETRY_FOR: Duration = Duration::from_secs(3);
+
 /// Look for QR codes in the image at `path`; the answer comes back as Event::Qr(path, .., notify).
-pub fn request(path: &str, notify: bool) {
-    let Ok(mut g) = TX.lock() else { return };
+/// Requests with `notify` (new screenshots) go before the quiet ones. False when the
+/// background thread could not be started (no answer will come).
+pub fn request(path: &str, notify: bool) -> bool {
+    let Ok(mut g) = TX.lock() else { return false };
     if g.is_none() {
         let (tx, rx) = channel::<(String, bool)>();
         let ok = std::thread::Builder::new()
@@ -31,16 +39,29 @@ pub fn request(path: &str, notify: bool) {
                 }
                 let wic: Option<IWICImagingFactory> =
                     unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok() };
-                while let Ok((p, notify)) = rx.recv() {
+                let mut queue: VecDeque<(String, bool)> = VecDeque::new();
+                loop {
+                    if queue.is_empty() {
+                        match rx.recv() {
+                            Ok(j) => queue.push_back(j),
+                            Err(_) => break,
+                        }
+                    }
+                    while let Ok(j) = rx.try_recv() {
+                        queue.push_back(j);
+                    }
+                    // a screenshot waiting for its notice goes before looking through the Shelf
+                    let i = queue.iter().position(|j| j.1).unwrap_or(0);
+                    let Some((p, notify)) = queue.remove(i) else { continue };
                     let mut codes = None;
                     if let Some(f) = wic.as_ref() {
-                        // a screenshot that just appeared may still be being written
-                        for i in 0..4 {
+                        let t0 = Instant::now();
+                        loop {
                             codes = unsafe { grey(f, &p) }.map(|(w, h, px)| scan(w, h, &px));
-                            if codes.is_some() || !notify || i == 3 {
+                            if codes.is_some() || !notify || t0.elapsed() >= RETRY_FOR {
                                 break;
                             }
-                            std::thread::sleep(Duration::from_millis(600));
+                            std::thread::sleep(RETRY);
                         }
                     }
                     post(Event::Qr(p, codes.unwrap_or_default(), notify));
@@ -48,13 +69,11 @@ pub fn request(path: &str, notify: bool) {
             })
             .is_ok();
         if !ok {
-            return;
+            return false;
         }
         *g = Some(tx);
     }
-    if let Some(tx) = g.as_ref() {
-        let _ = tx.send((path.to_string(), notify));
-    }
+    g.as_ref().map(|tx| tx.send((path.to_string(), notify)).is_ok()).unwrap_or(false)
 }
 
 /// Testing aid (VEYRA_DEMO=qr...): read the codes right here, on the calling thread.

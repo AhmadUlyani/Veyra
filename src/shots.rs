@@ -5,7 +5,16 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use windows::core::HSTRING;
+use windows::Win32::Foundation::WAIT_OBJECT_0;
+use windows::Win32::Storage::FileSystem::{
+    FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification, FILE_NOTIFY_CHANGE_FILE_NAME,
+    FILE_NOTIFY_CHANGE_LAST_WRITE,
+};
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+
+use crate::events::{post, Event};
 use windows::Win32::UI::Shell::{FOLDERID_Screenshots, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
 pub struct Watcher {
@@ -17,6 +26,10 @@ pub struct Watcher {
 }
 
 fn folder() -> Option<PathBuf> {
+    // testing aid: watch another folder instead (with VEYRA_DEMO, so nothing is saved)
+    if let Some(d) = std::env::var_os("VEYRA_SHOTS_DIR") {
+        return Some(PathBuf::from(d));
+    }
     unsafe {
         if let Ok(p) = SHGetKnownFolderPath(&FOLDERID_Screenshots, KF_FLAG_DEFAULT, None) {
             let s = p.to_string().ok();
@@ -34,6 +47,29 @@ fn is_image(p: &std::path::Path) -> bool {
         p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
         Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp")
     )
+}
+
+/// Wakes the UI (Event::ShotsChanged) as soon as something changes in the Screenshots folder,
+/// so a new screenshot is picked up at once instead of at the next 2-second check (which stays
+/// as the fallback, e.g. when the folder does not exist yet). Waits in the kernel: no CPU while idle.
+pub fn watch_changes() {
+    let Some(dir) = folder() else { return };
+    let _ = std::thread::Builder::new().name("shots".into()).spawn(move || unsafe {
+        let w = HSTRING::from(dir.as_os_str());
+        let Ok(h) = FindFirstChangeNotificationW(&w, false, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE) else {
+            return;
+        };
+        loop {
+            if WaitForSingleObject(h, INFINITE) != WAIT_OBJECT_0 {
+                break;
+            }
+            post(Event::ShotsChanged);
+            if FindNextChangeNotification(h).is_err() {
+                break;
+            }
+        }
+        let _ = FindCloseChangeNotification(h);
+    });
 }
 
 impl Watcher {

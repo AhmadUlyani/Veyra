@@ -327,6 +327,95 @@ unsafe fn covers_primary(h: HWND) -> bool {
     r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
 }
 
+/// An Event::Foreground is on its way and not handled yet: the next ones wait (a burst of
+/// window changes becomes one check).
+static ORDER_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Event::Foreground each time the stacking of windows changes or another window becomes the
+/// active one. A click in a maximized window can raise it over the island without making
+/// anything newly active, so the order itself is watched: the island is put back right then,
+/// not a second later. Windows tells about every reorder of the screen's windows on the
+/// desktop window; reorders inside other windows (lists, tabs) are ignored.
+pub fn watch_foreground() {
+    unsafe extern "system" fn on_ev(_: windows::Win32::UI::Accessibility::HWINEVENTHOOK, ev: u32, hwnd: HWND, _: i32, _: i32, _: u32, _: u32) {
+        if ev == EVENT_OBJECT_REORDER && hwnd != GetDesktopWindow() {
+            return;
+        }
+        if !ORDER_PENDING.swap(true, Ordering::AcqRel) {
+            post(Event::Foreground);
+        }
+    }
+    unsafe {
+        for ev in [EVENT_SYSTEM_FOREGROUND, EVENT_OBJECT_REORDER] {
+            let _ = windows::Win32::UI::Accessibility::SetWinEventHook(ev, ev, None, Some(on_ev), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        }
+    }
+}
+
+/// The Event::Foreground posted by watch_foreground is being handled: report the next change.
+pub fn foreground_seen() {
+    ORDER_PENDING.store(false, Ordering::Release);
+}
+
+/// The class of an ordinary (not always-on-top) window stacked above `hwnd` where it overlaps
+/// `area`, if there is one. An always-on-top window should never be under one, yet Windows
+/// sometimes leaves the island there (seen after a maximized window took the foreground), and
+/// then it looks gone until the desktop is in front. Other always-on-top windows don't count:
+/// those the island must not fight over.
+pub fn covered_by(hwnd: HWND, area: RECT) -> Option<String> {
+    unsafe {
+        let mut h = GetTopWindow(None).ok()?;
+        for _ in 0..4096 {
+            if h == hwnd {
+                return None;
+            }
+            let normal = GetWindowLongW(h, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 == 0;
+            if normal && IsWindowVisible(h).as_bool() && !IsIconic(h).as_bool() {
+                let mut r = RECT::default();
+                let over = GetWindowRect(h, &mut r).is_ok() && r.left < area.right && r.right > area.left && r.top < area.bottom && r.bottom > area.top;
+                // windows of other virtual desktops and suspended apps are cloaked: not on screen
+                let mut cloaked = 0u32;
+                let _ = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(
+                    h,
+                    windows::Win32::Graphics::Dwm::DWMWA_CLOAKED,
+                    &mut cloaked as *mut u32 as *mut _,
+                    4,
+                );
+                if over && cloaked == 0 {
+                    let mut b = [0u16; 64];
+                    let n = GetClassNameW(h, &mut b).max(0) as usize;
+                    return Some(String::from_utf16_lossy(&b[..n]));
+                }
+            }
+            h = GetWindow(h, GW_HWNDNEXT).ok()?;
+        }
+        None
+    }
+}
+
+/// For the log (VEYRA_DEBUG): what Windows reports and which window is in front, by its class
+/// only (never its title), its size and whether it is maximized.
+pub fn front_info() -> String {
+    unsafe {
+        let s = SHQueryUserNotificationState().map(|s| s.0).unwrap_or(-1);
+        let fg = GetForegroundWindow();
+        let mut b = [0u16; 64];
+        let n = GetClassNameW(fg, &mut b).max(0) as usize;
+        let mut r = RECT::default();
+        let _ = GetWindowRect(fg, &mut r);
+        let thick = GetWindowLongW(fg, GWL_STYLE) as u32 & WS_THICKFRAME.0 != 0;
+        format!(
+            "state={s} front={} rect={},{},{},{} zoomed={} thickframe={thick}",
+            String::from_utf16_lossy(&b[..n]),
+            r.left,
+            r.top,
+            r.right,
+            r.bottom,
+            IsZoomed(fg).as_bool()
+        )
+    }
+}
+
 /// Whether a full-screen app is in front of the primary screen (where the island lives).
 /// Windows keeps answering "busy" for as long as some games stay open behind other windows,
 /// so that answer only counts while the foreground window really fills the screen.

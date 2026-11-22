@@ -653,6 +653,10 @@ pub const WM_APP_QUIT: u32 = WM_APP + 4;
 
 const TIMER_ANIM: usize = 1;
 const TIMER_TICK: usize = 2;
+pub const TIMER_ONTOP: usize = 3;
+/// after another window became active: check the island is still on top this often, this many times
+const ONTOP_EVERY_MS: u32 = 30;
+const ONTOP_CHECKS: u32 = 20;
 
 // ------------------------------------------------------------------ app
 
@@ -754,6 +758,8 @@ pub struct App {
     qr_pop: Option<String>,
     /// a QR code just copied on that page (which one, when)
     qr_copied: Option<(Instant, usize)>,
+    /// on-top checks left after another window became active (TIMER_ONTOP)
+    ontop_checks: u32,
     drag_expanded: bool,
     collapse_at: Option<Instant>,
     /// the mouse has been over the panel since it opened (a panel opened from the tray, with
@@ -974,6 +980,7 @@ impl App {
             qr_later: None,
             qr_pop: None,
             qr_copied: None,
+            ontop_checks: 0,
             drag_expanded: false,
             collapse_at: None,
             panel_entered: false,
@@ -1046,6 +1053,8 @@ impl App {
     pub fn start(&mut self) {
         self.set_tick(250);
         self.register_mic_hotkey();
+        shots::watch_changes();
+        system::watch_foreground();
         if let Ok(v) = std::env::var("VEYRA_DEMO") {
             self.demo_view(&v);
             // testing aid: VEYRA_MOUSE=x,y (window pixels) pretends the cursor rests there, to see hovers
@@ -4939,20 +4948,11 @@ impl App {
             }
         }
 
-        // new screenshots -> Shelf (one cheap folder check every 2 s)
+        // new screenshots -> Shelf: the folder watcher reports them at once (Event::ShotsChanged);
+        // one cheap folder check every 2 s in case it could not start
         if self.data.settings.screenshots && n >= self.shots_next {
             self.shots_next = n + Duration::from_secs(2);
-            let new: Vec<String> = self.shots.poll().into_iter().filter(|p| !self.data.shelf.contains(p)).collect();
-            if !new.is_empty() {
-                let count = new.len();
-                for p in &new {
-                    self.qr_scan(p, true);
-                }
-                self.data.shelf.extend(new);
-                self.shelf_scroll = self.shelf_max();
-                self.dirty = true;
-                let title = if count == 1 { "Screenshot added to Shelf".to_string() } else { format!("{count} screenshots added to Shelf") };
-                self.toast(TIcon::G(ic::FOLDER), &title, "Drag it anywhere from the Shelf", 4.0, feat(&self.gfx, Tab::Shelf), Some(Tab::Shelf));
+            if self.poll_shots() {
                 redraw = true;
             }
         }
@@ -5166,6 +5166,7 @@ impl App {
     fn per_second(&mut self) {
         // hide during full-screen apps / presentations; reminders wait until it is back
         self.apply_visibility();
+        self.keep_on_top("1 s check");
         self.poll_privacy();
         let t = now();
         let today = t.date();
@@ -5403,6 +5404,19 @@ impl App {
                 Event::UpdateInfo(r, manual) => self.on_update_info(r, manual),
                 Event::UpdateDone(r) => self.on_update_done(r),
                 Event::Qr(p, codes, notify) => self.on_qr(p, codes, notify),
+                Event::Foreground => {
+                    system::foreground_seen();
+                    // the new window may be raised a moment after it becomes active: look now and
+                    // a few more times shortly after
+                    self.keep_on_top("windows restacked");
+                    self.ontop_checks = ONTOP_CHECKS;
+                    unsafe { SetTimer(self.hwnd, TIMER_ONTOP, ONTOP_EVERY_MS, None) };
+                }
+                Event::ShotsChanged => {
+                    if self.data.settings.screenshots {
+                        self.poll_shots();
+                    }
+                }
                 Event::Thumb(p, t) => {
                     // only while the file is still on the Shelf (it may be gone by now)
                     if let Some(slot) = self.thumbs.get_mut(&p) {
@@ -6023,12 +6037,43 @@ impl App {
 
     // -------------------------------------------------------------- QR codes
 
-    /// Look for QR codes in a Shelf image; `notify`: announce what is found.
-    fn qr_scan(&mut self, path: &str, notify: bool) {
-        if thumbs::is_image(path) {
-            self.qr.insert(path.to_string(), None);
-            qr::request(path, notify);
+    /// New screenshots -> Shelf. Each is read for QR codes before anything is said: then the
+    /// QR notice comes on its own, or "Screenshot added" when there is none (not one notice
+    /// first and the island hopping to the other a moment later).
+    fn poll_shots(&mut self) -> bool {
+        let new: Vec<String> = self.shots.poll().into_iter().filter(|p| !self.data.shelf.contains(p)).collect();
+        if new.is_empty() {
+            return false;
         }
+        dbg_log(&format!("shots: {} new", new.len()));
+        let mut unread = 0;
+        for p in &new {
+            if !self.qr_scan(p, true) {
+                unread += 1;
+            }
+        }
+        self.data.shelf.extend(new);
+        self.shelf_scroll = self.shelf_max();
+        self.dirty = true;
+        if unread > 0 {
+            self.shot_notice(unread);
+        }
+        true
+    }
+
+    fn shot_notice(&mut self, count: usize) {
+        let title = if count == 1 { "Screenshot added to Shelf".to_string() } else { format!("{count} screenshots added to Shelf") };
+        self.toast(TIcon::G(ic::FOLDER), &title, "Drag it anywhere from the Shelf", 4.0, feat(&self.gfx, Tab::Shelf), Some(Tab::Shelf));
+    }
+
+    /// Look for QR codes in a Shelf image; `notify`: announce what is found. False when it
+    /// will not be read (not a picture, or the reading thread is not there).
+    fn qr_scan(&mut self, path: &str, notify: bool) -> bool {
+        if !thumbs::is_image(path) {
+            return false;
+        }
+        self.qr.insert(path.to_string(), None);
+        qr::request(path, notify)
     }
 
     fn on_qr(&mut self, path: String, codes: Vec<String>, notify: bool) {
@@ -6037,17 +6082,21 @@ impl App {
             return;
         }
         // the count only: what a code says can be a password and must never reach the log file
-        if !codes.is_empty() {
-            dbg_log(&format!("qr: {} code(s) in a Shelf image", codes.len()));
-        }
+        dbg_log(&format!("qr: {} code(s) in a Shelf image{}", codes.len(), if notify { " (new screenshot)" } else { "" }));
         let found = !codes.is_empty();
         self.qr.insert(path.clone(), Some(codes));
-        if notify && found {
-            if self.hidden {
-                self.qr_later = Some(path);
-            } else {
-                self.qr_notice(&path);
-            }
+        if !notify {
+            return;
+        }
+        if !found {
+            self.shot_notice(1);
+        } else if self.expanded && self.tab == Tab::Shelf {
+            // the Shelf is open: its QR badge already shows it
+        } else if self.hidden || self.expanded {
+            // a notice under the open island would run out unseen: it comes once it closes
+            self.qr_later = Some(path);
+        } else {
+            self.qr_notice(&path);
         }
     }
 
@@ -6172,6 +6221,36 @@ impl App {
         }
     }
 
+    /// TIMER_ONTOP: one of the quick checks after another window became active.
+    pub fn ontop_timer(&mut self) {
+        self.keep_on_top("windows restacked");
+        self.ontop_checks = self.ontop_checks.saturating_sub(1);
+        if self.ontop_checks == 0 {
+            unsafe {
+                let _ = KillTimer(self.hwnd, TIMER_ONTOP);
+            }
+        }
+    }
+
+    /// Back above an ordinary window that ended up on top of the island (see system::covered_by).
+    fn keep_on_top(&mut self, why: &str) {
+        if self.hidden || self.leaving.is_some() || self.demo {
+            return;
+        }
+        let (l, t, w, h) = self.win;
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let area = RECT { left: l, top: t, right: l + w, bottom: t + h };
+        if let Some(class) = system::covered_by(self.hwnd, area) {
+            // the class only: a window title could say anything
+            dbg_log(&format!("z-order: under a {class} window, back on top ({why})"));
+            unsafe {
+                let _ = SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+    }
+
     /// Hidden while the user asked for it or a full-screen app is in front.
     fn apply_visibility(&mut self) {
         if self.leaving.is_some() {
@@ -6179,7 +6258,7 @@ impl App {
         }
         let want = self.user_hidden || system::fullscreen_busy(self.hidden);
         if want != self.hidden {
-            dbg_log(&format!("visibility: hidden={want} (by user: {})", self.user_hidden));
+            dbg_log(&format!("visibility: hidden={want} (by user: {}) {}", self.user_hidden, system::front_info()));
             self.hidden = want;
             // a hidden window hears nothing more from the mouse, so what it knew is out of date
             self.forget_pointer();
