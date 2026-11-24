@@ -193,10 +193,19 @@ pub fn power() -> Option<(bool, u8)> {
 }
 
 pub const GUID_BRIGHTNESS: GUID = GUID::from_u128(0x8ffee2c6_2d01_46be_adb9_398addc5b4ff);
+/// GUID_BATTERY_PERCENTAGE_REMAINING: sent on every 1% change. PBT_APMPOWERSTATUSCHANGE
+/// alone is not — Windows sends it for plug/unplug and some thresholds, so the percent went stale.
+pub const GUID_BATTERY_PERCENT: GUID = GUID::from_u128(0xa7ad8041_b45a_4cae_87a3_eecbb468a9e1);
 
 pub fn watch_brightness(hwnd: HWND) {
     unsafe {
         let _ = RegisterPowerSettingNotification(HANDLE(hwnd.0), &GUID_BRIGHTNESS, DEVICE_NOTIFY_WINDOW_HANDLE);
+    }
+}
+
+pub fn watch_battery(hwnd: HWND) {
+    unsafe {
+        let _ = RegisterPowerSettingNotification(HANDLE(hwnd.0), &GUID_BATTERY_PERCENT, DEVICE_NOTIFY_WINDOW_HANDLE);
     }
 }
 

@@ -740,6 +740,7 @@ pub struct App {
     /// new screenshots -> Shelf
     shots: shots::Watcher,
     shots_next: Instant,
+    power_next: Instant,
     shelf_scroll: usize,
     /// animated shelf position (in tiles), slides toward `shelf_scroll`
     shelf_x: f32,
@@ -905,6 +906,7 @@ impl App {
         let audio = system::Audio::new();
         system::watch_network();
         system::watch_brightness(hwnd);
+        system::watch_battery(hwnd);
         system::install_kb_hook();
         let n = Instant::now();
         let app = App {
@@ -970,6 +972,7 @@ impl App {
             menu_hold: false,
             shots: shots::Watcher::new(),
             shots_next: Instant::now(),
+            power_next: Instant::now() + Duration::from_secs(30),
             shelf_scroll: 0,
             shelf_x: 0.0,
             drag_hover: false,
@@ -4957,6 +4960,13 @@ impl App {
             }
         }
 
+        // battery: the per-percent notification keeps it current; a cheap re-read every 30 s
+        // in case a notification is missed (e.g. around sleep)
+        if n >= self.power_next {
+            self.power_next = n + Duration::from_secs(30);
+            self.refresh_power();
+        }
+
         if let Some(t) = &self.toast {
             if n >= t.until && !self.cursor_inside() {
                 self.toast = None;
@@ -5428,31 +5438,39 @@ impl App {
         self.kick();
     }
 
+    /// Reads the battery again; toasts on plug/unplug and once when it drops to 20%.
+    fn refresh_power(&mut self) {
+        let p = system::power();
+        if p == self.power {
+            return;
+        }
+        if let (Some((ac, pct)), Some((old_ac, _))) = (p, self.power) {
+            if ac != old_ac {
+                if ac {
+                    self.low_warned = false;
+                    self.toast(TIcon::Battery(pct as f32 / 100.0, true), "Charging", &format!("{pct}% · plugged in"), 3.0, GREEN, None);
+                } else {
+                    self.toast(TIcon::Battery(pct as f32 / 100.0, false), "On battery", &format!("{pct}% remaining"), 3.0, WHITE, None);
+                }
+            } else if !ac && pct <= 20 && !self.low_warned {
+                self.low_warned = true;
+                self.toast(TIcon::Battery(pct as f32 / 100.0, false), "Battery low", &format!("{pct}% left — plug in soon"), 6.0, RED, None);
+            }
+        }
+        self.power = p;
+        self.kick();
+    }
+
     pub fn on_power(&mut self, wp: WPARAM, lp: LPARAM) {
         const PBT_APMPOWERSTATUSCHANGE: usize = 0x000A;
         const PBT_POWERSETTINGCHANGE: usize = 0x8013;
         match wp.0 {
-            PBT_APMPOWERSTATUSCHANGE => {
-                let p = system::power();
-                if let (Some((ac, pct)), Some((old_ac, _))) = (p, self.power) {
-                    if ac != old_ac {
-                        if ac {
-                            self.low_warned = false;
-                            self.toast(TIcon::Battery(pct as f32 / 100.0, true), "Charging", &format!("{pct}% · plugged in"), 3.0, GREEN, None);
-                        } else {
-                            self.toast(TIcon::Battery(pct as f32 / 100.0, false), "On battery", &format!("{pct}% remaining"), 3.0, WHITE, None);
-                        }
-                    } else if !ac && pct <= 20 && !self.low_warned {
-                        self.low_warned = true;
-                        self.toast(TIcon::Battery(pct as f32 / 100.0, false), "Battery low", &format!("{pct}% left — plug in soon"), 6.0, RED, None);
-                    }
-                }
-                self.power = p;
-                self.kick();
-            }
+            PBT_APMPOWERSTATUSCHANGE => self.refresh_power(),
             PBT_POWERSETTINGCHANGE => unsafe {
                 let s = &*(lp.0 as *const POWERBROADCAST_SETTING);
-                if s.PowerSetting == system::GUID_BRIGHTNESS && s.DataLength >= 4 {
+                if s.PowerSetting == system::GUID_BATTERY_PERCENT {
+                    self.refresh_power();
+                } else if s.PowerSetting == system::GUID_BRIGHTNESS && s.DataLength >= 4 {
                     let v = std::ptr::read_unaligned(s.Data.as_ptr() as *const u32);
                     if self.bright_seen {
                         self.hud(K_BRIGHT, ic::BRIGHT, (v.min(100)) as f32 / 100.0, C::hex(0xFFD60A));
