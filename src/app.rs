@@ -531,6 +531,8 @@ enum Lyr {
     None,
     Loading,
     Missing,
+    /// LRCLIB did not answer in time; asked again a little later (see `lyr_retry`)
+    Failed,
     Found(Vec<Line>),
 }
 
@@ -701,6 +703,11 @@ pub struct App {
     lyr_key: u64,
     lyr: Lyr,
     lyr_scroll: f32,
+    /// a lookup for `lyr_key` is under way
+    lyr_busy: bool,
+    /// LRCLIB did not answer: when to ask again, and how many times it failed for this track
+    lyr_retry: Option<Instant>,
+    lyr_fails: u32,
     pomo: Pomo,
     toast: Option<Toast>,
     toast_seq: u64,
@@ -943,6 +950,9 @@ impl App {
             lyr_key: 0,
             lyr: Lyr::None,
             lyr_scroll: 0.0,
+            lyr_busy: false,
+            lyr_retry: None,
+            lyr_fails: 0,
             pomo: Pomo { mode: PMode::Idle, end: n, left: 0.0, total: 1.0, paused: false },
             toast: None,
             toast_seq: 0,
@@ -1484,14 +1494,27 @@ impl App {
         }
     }
 
+    /// Looks up the current track's lyrics if that has not been done yet, or if the last
+    /// lookup could not reach LRCLIB (opening the lyrics then asks again at once).
     fn ensure_lyrics(&mut self) {
+        let Some(key) = self.media.as_ref().map(|m| m.key) else { return };
+        if self.lyr_key != key {
+            self.lyr_key = key;
+            self.lyr = Lyr::Loading;
+            self.lyr_scroll = 0.0;
+            self.lyr_fails = 0;
+            self.fetch_lyrics();
+        } else if matches!(self.lyr, Lyr::Failed) && !self.lyr_busy {
+            self.lyr_fails = 0;
+            self.fetch_lyrics();
+        }
+    }
+
+    fn fetch_lyrics(&mut self) {
         if let Some(m) = &self.media {
-            if self.lyr_key != m.key {
-                self.lyr_key = m.key;
-                self.lyr = Lyr::Loading;
-                self.lyr_scroll = 0.0;
-                lyrics::fetch(m.key, m.title.clone(), m.artist.clone(), m.album.clone(), m.dur);
-            }
+            self.lyr_busy = true;
+            self.lyr_retry = None;
+            lyrics::fetch(m.key, m.title.clone(), m.artist.clone(), m.album.clone(), m.dur);
         }
     }
 
@@ -3622,6 +3645,10 @@ impl App {
                 g.text("No synced lyrics found for this track", R::new(a.x, a.cy() - 18.0, a.w, 20.0), 13.0, 600, T2, Al::C);
                 g.text("Lyrics come from lrclib.net", R::new(a.x, a.cy() + 2.0, a.w, 18.0), 11.5, 400, T3, Al::C);
             }
+            Lyr::Failed => {
+                g.text("Couldn't reach lrclib.net", R::new(a.x, a.cy() - 18.0, a.w, 20.0), 13.0, 600, T2, Al::C);
+                g.text("Trying again in a moment…", R::new(a.x, a.cy() + 2.0, a.w, 18.0), 11.5, 400, T3, Al::C);
+            }
         }
     }
 
@@ -4960,6 +4987,18 @@ impl App {
             }
         }
 
+        // lyrics: LRCLIB did not answer last time; ask again while they are still wanted
+        if let Some(at) = self.lyr_retry {
+            if n >= at {
+                self.lyr_retry = None;
+                let wanted = self.lyrics_open || self.data.settings.mini_lyrics;
+                let same = self.media.as_ref().map(|m| m.key == self.lyr_key).unwrap_or(false);
+                if wanted && same && matches!(self.lyr, Lyr::Failed) && !self.lyr_busy {
+                    self.fetch_lyrics();
+                }
+            }
+        }
+
         // battery: the per-percent notification keeps it current; a cheap re-read every 30 s
         // in case a notification is missed (e.g. around sleep)
         if n >= self.power_next {
@@ -5323,12 +5362,24 @@ impl App {
                     // the download's buffers (JSON with every search hit) are freed by now
                     crate::util::release_free_heap();
                     if key == self.lyr_key {
-                        self.lyr = match r {
-                            Some(v) if !v.is_empty() => Lyr::Found(v),
-                            _ => Lyr::Missing,
-                        };
-                        if let Some(c) = self.cur_line() {
-                            self.lyr_scroll = c as f32;
+                        self.lyr_busy = false;
+                        match r {
+                            Ok(Some(v)) if !v.is_empty() => {
+                                self.lyr = Lyr::Found(v);
+                                if let Some(c) = self.cur_line() {
+                                    self.lyr_scroll = c as f32;
+                                }
+                            }
+                            Ok(_) => self.lyr = Lyr::Missing,
+                            // LRCLIB slow or unreachable: that is not "no lyrics", so ask again
+                            // a little later (5 s, 15 s, 30 s, then every minute)
+                            Err(()) => {
+                                self.lyr_fails += 1;
+                                let secs = [5, 15, 30].get(self.lyr_fails as usize - 1).copied().unwrap_or(60);
+                                self.lyr = Lyr::Failed;
+                                self.lyr_retry = Some(Instant::now() + Duration::from_secs(secs));
+                                dbg_log(&format!("lyrics: lrclib did not answer (try {}), again in {secs} s", self.lyr_fails));
+                            }
                         }
                     }
                 }

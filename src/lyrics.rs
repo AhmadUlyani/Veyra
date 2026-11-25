@@ -1,11 +1,20 @@
 //! Synced lyrics from LRCLIB (https://lrclib.net), a free, open lyrics database.
 
+use std::time::{Duration, Instant};
+
 use windows::core::*;
-use windows::Foundation::Uri;
+use windows::Foundation::{AsyncStatus, IAsyncInfo, Uri};
 use windows::Web::Http::{HttpClient, HttpStatusCode};
 use windows::Win32::System::WinRT::*;
 
 use crate::events::{post, Event};
+
+/// Each request gives up after this long: LRCLIB sometimes takes 20 s or more, or never answers.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `Ok(Some(lines))` found, `Ok(None)` LRCLIB has no synced lyrics for the track,
+/// `Err(())` LRCLIB did not answer in time or failed (worth asking again later).
+pub type Lookup = std::result::Result<Option<Vec<Line>>, ()>;
 
 #[derive(Clone)]
 pub struct Line {
@@ -27,13 +36,43 @@ fn esc(s: &str) -> String {
     Uri::EscapeComponent(&HSTRING::from(s)).map(|h| h.to_string()).unwrap_or_default()
 }
 
-fn http_get(client: &HttpClient, url: &str) -> Option<String> {
-    let uri = Uri::CreateUri(&HSTRING::from(url)).ok()?;
-    let resp = client.GetAsync(&uri).ok()?.get().ok()?;
-    if resp.StatusCode().ok()? != HttpStatusCode::Ok {
-        return None;
+/// Waits for a WinRT operation until `deadline`; cancels it and answers false if it has not
+/// finished by then (or failed).
+fn finished(info: &IAsyncInfo, deadline: Instant) -> bool {
+    loop {
+        match info.Status() {
+            Ok(AsyncStatus::Started) => {}
+            Ok(AsyncStatus::Completed) => return true,
+            _ => return false,
+        }
+        if Instant::now() >= deadline {
+            let _ = info.Cancel();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    Some(resp.Content().ok()?.ReadAsStringAsync().ok()?.get().ok()?.to_string())
+}
+
+/// `Ok(Some(body))` on 200, `Ok(None)` when LRCLIB has no such track (404),
+/// `Err(())` on no answer, a timeout or a server error.
+fn http_get(client: &HttpClient, url: &str) -> std::result::Result<Option<String>, ()> {
+    let deadline = Instant::now() + TIMEOUT;
+    let uri = Uri::CreateUri(&HSTRING::from(url)).map_err(|_| ())?;
+    let op = client.GetAsync(&uri).map_err(|_| ())?;
+    if !finished(&op.cast().map_err(|_| ())?, deadline) {
+        return Err(());
+    }
+    let resp = op.get().map_err(|_| ())?;
+    match resp.StatusCode().map_err(|_| ())? {
+        HttpStatusCode::Ok => {}
+        HttpStatusCode::NotFound => return Ok(None),
+        _ => return Err(()),
+    }
+    let op = resp.Content().map_err(|_| ())?.ReadAsStringAsync().map_err(|_| ())?;
+    if !finished(&op.cast().map_err(|_| ())?, deadline) {
+        return Err(());
+    }
+    Ok(Some(op.get().map_err(|_| ())?.to_string()))
 }
 
 const NOISE: [&str; 14] = [
@@ -113,8 +152,10 @@ fn pick(json: &serde_json::Value, dur: f64) -> Option<String> {
     best.map(|b| b.1)
 }
 
-fn find(title: &str, artist: &str, album: &str, dur: f64) -> Option<Vec<Line>> {
-    let client = HttpClient::new().ok()?;
+/// Tries the track's name variants in turn. The first request LRCLIB fails to answer ends the
+/// lookup with `Err`: the rest would most likely time out too.
+fn find(title: &str, artist: &str, album: &str, dur: f64) -> Lookup {
+    let client = HttpClient::new().map_err(|_| ())?;
     if let Ok(h) = client.DefaultRequestHeaders() {
         if let Ok(ua) = h.UserAgent() {
             let _ = ua.TryParseAdd(&HSTRING::from("Veyra/0.1 (Windows dynamic island)"));
@@ -133,12 +174,12 @@ fn find(title: &str, artist: &str, album: &str, dur: f64) -> Option<Vec<Line>> {
             if dur > 0.0 {
                 url.push_str(&format!("&duration={}", dur.round() as i64));
             }
-            if let Some(body) = http_get(&client, &url) {
+            if let Some(body) = http_get(&client, &url)? {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
                     if let Some(s) = v.get("syncedLyrics").and_then(|x| x.as_str()) {
                         let l = parse_lrc(s);
                         if !l.is_empty() {
-                            return Some(l);
+                            return Ok(Some(l));
                         }
                     }
                 }
@@ -149,21 +190,21 @@ fn find(title: &str, artist: &str, album: &str, dur: f64) -> Option<Vec<Line>> {
         } else {
             format!("{base}/search?track_name={}&artist_name={}", esc(&t), esc(&a))
         };
-        if let Some(body) = http_get(&client, &url) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(s) = pick(&v, dur) {
-                    let l = parse_lrc(&s);
-                    if !l.is_empty() {
-                        return Some(l);
-                    }
-                }
+        if let Some(body) = http_get(&client, &url)? {
+            if let Some(l) = from_search(&body, dur) {
+                return Ok(Some(l));
             }
         }
     }
     // last resort: free-text search
     let q = format!("{} {}", strip_brackets(title, true), clean_artist(artist));
     let body = http_get(&client, &format!("{base}/search?q={}", esc(q.trim())))?;
-    let v = serde_json::from_str::<serde_json::Value>(&body).ok()?;
+    Ok(body.and_then(|b| from_search(&b, dur)))
+}
+
+/// The best synced lyrics in a search answer.
+fn from_search(body: &str, dur: f64) -> Option<Vec<Line>> {
+    let v = serde_json::from_str::<serde_json::Value>(body).ok()?;
     let l = parse_lrc(&pick(&v, dur)?);
     (!l.is_empty()).then_some(l)
 }

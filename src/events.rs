@@ -7,7 +7,6 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
-use crate::lyrics::Line;
 use crate::media::{Art, MediaState};
 use crate::thumbs::Thumb;
 
@@ -19,7 +18,7 @@ static QUEUE: Mutex<Vec<Event>> = Mutex::new(Vec::new());
 pub enum Event {
     Media(Option<MediaState>),
     Art(Option<Art>),
-    Lyrics(u64, Option<Vec<Line>>),
+    Lyrics(u64, crate::lyrics::Lookup),
     Volume(f32, bool),
     AudioDevice,
     NetChanged,
